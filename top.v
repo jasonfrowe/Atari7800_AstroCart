@@ -1,7 +1,7 @@
 module top (
     input clk,              // 27MHz System Clock
     
-    // Atari Interface (Raw Inputs)
+    // Atari Interface
     input [15:0] a,         // Address Bus
     inout [7:0]  d,         // Data Bus
     input        phi2,      // Phase 2 Clock
@@ -18,11 +18,8 @@ module top (
 );
 
     // ========================================================================
-    // 1. INPUT SYNCHRONIZATION (The Glitch Filter)
+    // 1. INPUT SYNCHRONIZATION
     // ========================================================================
-    // We register the inputs to align them to our 27MHz clock.
-    // This prevents "metastability" and filters out tiny noise spikes.
-    
     reg [15:0] a_safe;
     reg phi2_safe;
     reg rw_safe;
@@ -36,79 +33,89 @@ module top (
     end
 
     // ========================================================================
-    // 2. ROM LOGIC (Block RAM)
+    // 2. MEMORY & DECODING
     // ========================================================================
     reg [7:0] rom_memory [0:49151]; 
     reg [7:0] data_out;
-    
     initial $readmemh("game.hex", rom_memory);
 
-    // Calculate Index based on the SAFE address
     wire [15:0] rom_index = a_safe - 16'h4000;
 
-    // Fetch Data
+    // ROM Fetch
     always @(posedge clk) begin
-        if (rom_index < 49152) 
-            data_out <= rom_memory[rom_index];
-        else 
-            data_out <= 8'hFF;
+        if (rom_index < 49152) data_out <= rom_memory[rom_index];
+        else data_out <= 8'hFF;
     end
+    
+    // Decoders (Using SAFE address)
+    wire is_rom   = (a_safe[15] | a_safe[14]);          // $4000-$FFFF
+    wire is_pokey = (a_safe[15:4] == 12'h045);          // $0450-$045F
 
     // ========================================================================
-    // 3. SAFETY LOGIC (The Crash Fix)
+    // 3. BUS ARBITRATION
     // ========================================================================
     
-    // Decode based on SAFE address
-    wire is_rom_range = (a_safe[15] | a_safe[14]); // $4000-$FFFF
-
-    // --- STATE MACHINE FOR DRIVING ---
-    // We only want to drive when we are 100% sure we are in a valid cycle.
-    
-    // CPU Mode: Valid when PHI2 is High AND Halt is High.
+    // Valid Timing Windows
     wire cpu_active = (phi2_safe && halt_safe);
-    
-    // DMA Mode: Valid when Halt is Low.
     wire dma_active = (!halt_safe);
 
-    // Master Drive Enable
-    // 1. Must be ROM Range
-    // 2. Must be Read (rw=1)
-    // 3. Must be in a Valid Timing Window (CPU or DMA)
-    wire should_drive = is_rom_range && rw_safe && (cpu_active || dma_active);
+    // Drive Enable (Read from ROM)
+    wire should_drive = is_rom && rw_safe && (cpu_active || dma_active);
+
+    // Write Enable (Write to POKEY)
+    // STRICT RULE: Only write when PHI2 is High (Data is valid).
+    wire pokey_we = is_pokey && !rw_safe && phi2_safe;
 
     // ========================================================================
-    // 4. OUTPUT CONTROL (Prevent Buffer Fighting)
+    // 4. OUTPUTS
     // ========================================================================
 
-    // We use registers for outputs to ensure clean transitions.
     always @(posedge clk) begin
-        
-        // DIRECTION CONTROL
-        // We follow RW, but we latch it to prevent mid-cycle flips.
+        // Direction follows RW (1=Out/Read, 0=In/Write)
         buf_dir <= rw_safe; 
 
-        // OUTPUT ENABLE CONTROL
-        // Active Low (0 = ON).
-        if (should_drive) begin
-            buf_oe <= 1'b0; // Enable Buffer
+        // Output Enable (Active Low)
+        // Enable if Driving ROM OR if Atari is Writing (to us)
+        // We must enable the buffer to receive the write data!
+        if (should_drive || pokey_we) begin
+            buf_oe <= 1'b0; 
         end else begin
-            buf_oe <= 1'b1; // Disable Buffer (High Z)
+            buf_oe <= 1'b1; 
         end
     end
 
-    // FPGA Tristate Driver
-    // We use the same 'should_drive' logic logic to gate the internal bus.
+    // FPGA Tristate
     assign d = (should_drive) ? data_out : 8'bz;
 
     // ========================================================================
-    // 5. DEBUG
+    // 5. POKEY AUDIO INSTANCE
     // ========================================================================
-    assign audio = 1'b0; // Silence for now
+    
+    // Clock Divider (27MHz -> 1.79MHz)
+    reg [3:0] clk_div;
+    wire tick_179 = (clk_div == 14);
+    
+    always @(posedge clk) begin
+        if (tick_179) clk_div <= 0;
+        else clk_div <= clk_div + 1;
+    end
 
-    // LED 0: Solid ON means stuck. Flicker means healthy activity.
-    assign led[0] = ~buf_oe; 
-    assign led[1] = ~phi2_safe;
-    assign led[2] = ~rw_safe;
+    pokey_advanced my_pokey (
+        .clk(clk),
+        .enable_179mhz(tick_179),
+        .reset_n(1'b1),
+        .addr(a_safe[3:0]),  // Register 0-F
+        .din(d),             // Input Data (from Atari)
+        .we(pokey_we),       // Synchronized Write Enable
+        .audio_pwm(audio)
+    );
+
+    // ========================================================================
+    // 6. DEBUG
+    // ========================================================================
+    assign led[0] = ~buf_oe;     // Bus Activity
+    assign led[1] = ~pokey_we;   // Flicker on Audio Write
+    assign led[2] = ~halt_safe;  // DMA Activity
     assign led[5:3] = 3'b111;
 
 endmodule
