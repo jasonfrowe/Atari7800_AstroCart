@@ -1,29 +1,34 @@
 module top (
-    input clk,              // 27MHz System Clock
+    input clk,              // 27MHz Crystal (Bus Clock)
     
     // Atari Interface
-    input [15:0] a,         // Address Bus
-    inout [7:0]  d,         // Data Bus
-    input        phi2,      // Phase 2 Clock
-    input        rw,        // Read/Write
-    input        halt,      // Halt Line
-    input        irq,       // IRQ Line
+    input [15:0] a, inout [7:0] d,
+    input phi2, input rw, input halt, input irq,
     
-    // Buffer Control
-    output reg   buf_dir,   // Buffer Direction
-    output reg   buf_oe,    // Buffer Enable
-    
-    output       audio,     // Audio PWM
-    output [5:0] led        // Debug LEDs
+    // Outputs
+    output reg buf_dir, output reg buf_oe,
+    output audio, output [5:0] led
 );
 
     // ========================================================================
-    // 1. INPUT SYNCHRONIZATION
+    // 1. CLOCK GENERATION (Split Domain)
     // ========================================================================
+    wire sys_clk; // 108 MHz (For Audio & PSRAM)
+    wire pll_lock;
+    
+    gowin_pll my_pll (
+        .clkin(clk),
+        .clkout(sys_clk),
+        .lock(pll_lock)
+    );
+
+    // ========================================================================
+    // 2. BUS LOGIC (Running at STABLE 27MHz)
+    // ========================================================================
+    // We revert to the logic that worked perfectly before.
+    
     reg [15:0] a_safe;
-    reg phi2_safe;
-    reg rw_safe;
-    reg halt_safe;
+    reg phi2_safe, rw_safe, halt_safe;
 
     always @(posedge clk) begin
         a_safe    <= a;
@@ -32,90 +37,77 @@ module top (
         halt_safe <= halt;
     end
 
-    // ========================================================================
-    // 2. MEMORY & DECODING
-    // ========================================================================
+    // Memory (48KB BRAM)
     reg [7:0] rom_memory [0:49151]; 
     reg [7:0] data_out;
     initial $readmemh("game.hex", rom_memory);
 
-    wire [15:0] rom_index = a_safe - 16'h4000;
-
-    // ROM Fetch
-    always @(posedge clk) begin
-        if (rom_index < 49152) data_out <= rom_memory[rom_index];
-        else data_out <= 8'hFF;
-    end
+    // Decoding
+    reg [15:0] final_rom_addr;
     
-    // Decoders (Using SAFE address)
-    wire is_rom   = (a_safe[15] | a_safe[14]);          // $4000-$FFFF
-    wire is_pokey = (a_safe[15:4] == 12'h045);          // $0450-$045F
+    // Config
+    reg [7:0] mapper_flags [0:0]; 
+    initial $readmemh("mapper.hex", mapper_flags);
+    wire has_pokey = mapper_flags[0][1];
 
-    // ========================================================================
-    // 3. BUS ARBITRATION
-    // ========================================================================
-    
-    // Valid Timing Windows
-    wire cpu_active = (phi2_safe && halt_safe);
-    wire dma_active = (!halt_safe);
-
-    // Drive Enable (Read from ROM)
-    wire should_drive = is_rom && rw_safe && (cpu_active || dma_active);
-
-    // Write Enable (Write to POKEY)
-    // STRICT RULE: Only write when PHI2 is High (Data is valid).
-    wire pokey_we = is_pokey && !rw_safe && phi2_safe;
-
-    // ========================================================================
-    // 4. OUTPUTS
-    // ========================================================================
-
-    always @(posedge clk) begin
-        // Direction follows RW (1=Out/Read, 0=In/Write)
-        buf_dir <= rw_safe; 
-
-        // Output Enable (Active Low)
-        // Enable if Driving ROM OR if Atari is Writing (to us)
-        // We must enable the buffer to receive the write data!
-        if (should_drive || pokey_we) begin
-            buf_oe <= 1'b0; 
-        end else begin
-            buf_oe <= 1'b1; 
-        end
+    always @(*) begin
+        if (a_safe >= 16'h4000) final_rom_addr = a_safe - 16'h4000;
+        else final_rom_addr = 0;
     end
 
-    // FPGA Tristate
+    // Access (27MHz)
+    always @(posedge clk) begin
+        if (final_rom_addr < 49152) data_out <= rom_memory[final_rom_addr];
+        else data_out <= 8'hEA;
+    end
+
+    // Bus Control (The "Crash Proof" Logic)
+    wire is_addr_valid = (a_safe >= 16'h4000); 
+    wire is_pokey_addr = (a_safe[15:4] == 12'h045); 
+    wire timing_ok = (phi2_safe && halt_safe) || (!halt_safe);
+    wire should_drive = is_addr_valid && rw_safe && timing_ok && !is_pokey_addr;
+
+    always @(posedge clk) begin
+        buf_dir <= rw_safe;
+        if (should_drive || (!rw_safe && is_pokey_addr)) buf_oe <= 0;
+        else buf_oe <= 1;
+    end
     assign d = (should_drive) ? data_out : 8'bz;
 
     // ========================================================================
-    // 5. POKEY AUDIO INSTANCE
+    // 3. POKEY LOGIC (Running at HIGH RES 108MHz)
     // ========================================================================
     
-    // Clock Divider (27MHz -> 1.79MHz)
-    reg [3:0] clk_div;
-    wire tick_179 = (clk_div == 14);
+    // We need to generate the 1.79MHz tick from the 108MHz clock.
+    // 108 MHz / 1.79 MHz = ~60.33. 
+    // We use a counter to 60.
+    reg [5:0] tick_cnt;
+    wire tick_179 = (tick_cnt == 59);
     
-    always @(posedge clk) begin
-        if (tick_179) clk_div <= 0;
-        else clk_div <= clk_div + 1;
+    always @(posedge sys_clk) begin
+        if (tick_179) tick_cnt <= 0; else tick_cnt <= tick_cnt + 1;
     end
 
-    pokey_advanced my_pokey (
-        .clk(clk),
+    // Cross-Domain Write Enable
+    // The 'pokey_we' signal comes from the 27MHz domain.
+    // It will be High for ~20 sys_clk cycles. That is fine. 
+    // POKEY registers are just latches; writing the same value 20 times is safe.
+    wire pokey_we = is_pokey_addr && !rw_safe && phi2_safe;
+    
+    wire audio_raw;
+    assign audio = audio_raw; 
+
+    pokey_complete my_pokey (
+        .clk(sys_clk),          // Fast Clock!
         .enable_179mhz(tick_179),
-        .reset_n(1'b1),
-        .addr(a_safe[3:0]),  // Register 0-F
-        .din(d),             // Input Data (from Atari)
-        .we(pokey_we),       // Synchronized Write Enable
-        .audio_pwm(audio)
+        .reset_n(pll_lock),     // Wait for PLL
+        .addr(a_safe[3:0]),
+        .din(d),                // Data from bus
+        .we(pokey_we),          
+        .audio_pwm(audio_raw)
     );
 
-    // ========================================================================
-    // 6. DEBUG
-    // ========================================================================
-    assign led[0] = ~buf_oe;     // Bus Activity
-    assign led[1] = ~pokey_we;   // Flicker on Audio Write
-    assign led[2] = ~halt_safe;  // DMA Activity
-    assign led[5:3] = 3'b111;
+    assign led[0] = ~buf_oe;
+    assign led[1] = ~pll_lock; 
 
 endmodule
