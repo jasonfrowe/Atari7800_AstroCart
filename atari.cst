@@ -1,0 +1,61 @@
+// --- CLOCK (Onboard 27MHz) ---
+IO_LOC "clk" 52;
+IO_PORT "clk" PULL_MODE=UP;
+
+// --- DATA BUS (Bi-Directional) ---
+IO_LOC "d[0]" 41;
+IO_LOC "d[1]" 40;
+IO_LOC "d[2]" 33;
+IO_LOC "d[3]" 29;
+IO_LOC "d[4]" 30;
+IO_LOC "d[5]" 34;
+IO_LOC "d[6]" 35;
+IO_LOC "d[7]" 42;
+IO_PORT "d" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+// --- ADDRESS BUS (Inputs) ---
+IO_LOC "a[0]" 25;
+IO_LOC "a[1]" 27;
+IO_LOC "a[2]" 51;
+IO_LOC "a[3]" 54;
+IO_LOC "a[4]" 56;
+IO_LOC "a[5]" 31;
+IO_LOC "a[6]" 32;
+IO_LOC "a[7]" 63;
+IO_LOC "a[8]" 57;
+IO_LOC "a[9]" 55;
+IO_LOC "a[10]" 28;
+IO_LOC "a[11]" 53;
+IO_LOC "a[12]" 26;
+IO_LOC "a[13]" 77;
+IO_LOC "a[14]" 48;
+IO_LOC "a[15]" 49;
+IO_PORT "a" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+// --- CONTROL SIGNALS (1.8V BANK) ---
+IO_LOC "phi2" 85;
+IO_LOC "rw" 86;
+IO_LOC "halt" 84;
+IO_LOC "irq" 83;
+IO_LOC "buf_dir" 81;  // Direction
+IO_LOC "buf_oe" 82;   // /Output Enable
+// IMPORTANT: These are on Bank 2, so we MUST use LVCMOS18
+IO_PORT "phi2" IO_TYPE=LVCMOS18 PULL_MODE=UP;
+IO_PORT "rw" IO_TYPE=LVCMOS18 PULL_MODE=UP;
+IO_PORT "halt" IO_TYPE=LVCMOS18 PULL_MODE=UP;
+IO_PORT "irq" IO_TYPE=LVCMOS18 PULL_MODE=UP;
+IO_PORT "buf_dir" IO_TYPE=LVCMOS18 PULL_MODE=NONE DRIVE=8;
+IO_PORT "buf_oe" IO_TYPE=LVCMOS18 PULL_MODE=NONE DRIVE=8;
+
+// --- AUDIO ---
+IO_LOC "audio" 76;
+IO_PORT "audio" IO_TYPE=LVCMOS33 DRIVE=8;
+
+// --- DEBUG LEDS (Onboard) ---
+IO_LOC "led[0]" 10;
+IO_LOC "led[1]" 11;
+IO_LOC "led[2]" 13;
+IO_LOC "led[3]" 14;
+IO_LOC "led[4]" 15;
+IO_LOC "led[5]" 16;
+IO_PORT "led" IO_TYPE=LVCMOS18 PULL_MODE=UP DRIVE=8;
