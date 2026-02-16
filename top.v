@@ -63,6 +63,7 @@ module top (
     // Decoders (Using SAFE address)
     wire is_rom   = (a_safe[15] | a_safe[14]);          // $4000-$FFFF
     wire is_pokey = (a_safe[15:4] == 12'h045);          // $0450-$045F
+    wire is_2200  = (a_safe == 16'h2200);               // $2200 (Menu Control)
 
     // ========================================================================
     // 3. BUS ARBITRATION
@@ -155,6 +156,7 @@ module top (
     reg [22:0] timer_pokey; reg state_pokey;
     reg [22:0] timer_rw;    reg state_rw;
     reg [22:0] timer_oe;    reg state_oe;
+    reg [22:0] timer_2200;  reg state_2200;  // $2200 detector
     
     reg [23:0] heartbeat;
 
@@ -218,14 +220,28 @@ module top (
                 timer_oe <= BLINK_DUR;
             end
         end
+        
+        // --- $2200 Smart Blinker (Menu Control) ---
+        if (state_2200) begin
+            if (timer_2200 == 0) begin
+                state_2200 <= 0;
+                timer_2200 <= BLINK_DUR;
+            end else timer_2200 <= timer_2200 - 1;
+        end else begin
+            if (timer_2200 > 0) timer_2200 <= timer_2200 - 1;
+            else if (atari_active && is_2200 && !rw_safe) begin // GATED - Write to $2200
+                state_2200 <= 1;
+                timer_2200 <= BLINK_DUR;
+            end
+        end
     end
 
     // LED Assignments
-    assign led[0] = ~state_a15;
-    assign led[1] = ~state_pokey;
-    assign led[2] = ~state_rw;
+    assign led[0] = ~state_a15;                           // A15 (RAM/TIA access)
+    assign led[1] = ~state_pokey;                         // POKEY activity
+    assign led[2] = ~state_2200;                          // $2200 Write Detection
     assign led[3] = atari_active ? heartbeat[23] : 1'b1;  // Heartbeat (only when Atari ON)
-    assign led[4] = ~atari_active;       // ON when Atari Running
-    assign led[5] = ~state_oe;
+    assign led[4] = ~atari_active;                        // ON when Atari Running
+    assign led[5] = ~state_oe;                            // Bus Drive activity
 
 endmodule
