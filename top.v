@@ -13,27 +13,21 @@ module top (
     output reg   buf_dir,   // Buffer Direction
     output reg   buf_oe,    // Buffer Enable
     
-    // SD Card (SPI)
+    // SD Card (SPI Mode)
+    output       sd_cs,     // SPI Chip Select (active low)
+    output       sd_mosi,   // SPI MOSI (Master Out, Slave In)
+    input        sd_miso,   // SPI MISO (Master In, Slave Out)
     output       sd_clk,    // SPI Clock
-    output       sd_mosi,   // SPI MOSI
-    input        sd_miso,   // SPI MISO
-    output       sd_cs_n,   // SPI Chip Select (active low)
     
     output       audio,     // Audio PWM
     output [5:0] led        // Debug LEDs
 );
 
     // ========================================================================
-    // 0. CLOCK GENERATION (PLL REMOVED - RUNNING NATIVE 27MHz)
+    // 0. CLOCK GENERATION (No PLL - 27MHz native, Atari crashes with 81MHz)
     // ========================================================================
-    wire sys_clk = clk;     // 27MHz
-    wire pll_lock = 1'b1;   // Always Ready
-    
-    // gowin_pll my_pll (
-    //     .clkin(clk),
-    //     .clkout(sys_clk),
-    //     .lock(pll_lock)
-    // );
+    wire sys_clk = clk;     // 27MHz native
+    wire pll_lock = 1'b1;   // Always locked (no PLL)
 
     // ========================================================================
     // 1. INPUT SYNCHRONIZATION
@@ -133,245 +127,158 @@ module top (
     );
 
     // ========================================================================
-    // 6. SD CARD - FAT32-Lite File Detection
+    // 6. SD CARD - calint sd_controller (Tang 9K proven)
     // ========================================================================
-    // Strategy: Skip boot sector, scan sector 8192+ for root directory
-    // Look for "GAME0   A78" through "GAME5   A78" patterns
     
-    // SD Control Signals
-    reg sd_cmd_start;
-    reg [7:0] sd_cmd_byte;
-    wire [7:0] sd_resp_byte;
-    wire sd_busy;
-    wire sd_data_valid;
+    // SD Card - MIT sd_controller (Tang 9K compatible)
+    // Direct rd/wr interface
     
-    sd_spi_controller sd_ctrl (
+    // Slow clock for SD controller
+    reg [1:0] clk_div_counter;  // Divide by 4 -> ~6.75MHz SPI
+    reg clk_pulse_slow;
+    
+    always @(posedge sys_clk) begin
+        clk_div_counter <= clk_div_counter + 1;
+        clk_pulse_slow <= (clk_div_counter == 0);
+    end
+    
+    // SD Controller signals
+    wire sd_ready;
+    wire [7:0] sd_dout;
+    wire sd_byte_available;
+    wire [4:0] sd_status;
+    wire [7:0] sd_recv_data;
+    reg sd_rd;
+    reg [31:0] sd_address;
+    
+    sd_controller sd_ctrl (
+        .cs(sd_cs),
+        .mosi(sd_mosi),
+        .miso(sd_miso),
+        .sclk(sd_clk),
+        .rd(sd_rd),
+        .dout(sd_dout),
+        .byte_available(sd_byte_available),
+        .wr(1'b0),                    // No writes for now
+        .din(8'h00),
+        .ready_for_next_byte(),       // Unused
+        .reset(~pll_lock),
+        .ready(sd_ready),
+        .address(sd_address),          // SDHC: sector number directly
         .clk(sys_clk),
-        .reset_n(pll_lock),
-        .cmd_start(sd_cmd_start),
-        .cmd_byte(sd_cmd_byte),
-        .resp_byte(sd_resp_byte),
-        .busy(sd_busy),
-        .data_valid(sd_data_valid),
-        .spi_clk(sd_clk),
-        .spi_mosi(sd_mosi),
-        .spi_miso(sd_miso),
-        .spi_cs_n(sd_cs_n)
+        .clk_pulse_slow(clk_pulse_slow),
+        .status(sd_status),
+        .recv_data(sd_recv_data)
     );
     
     // File detection storage
     reg [5:0] files_found;          // Bitmask for GAME0-GAME5
     reg [2:0] file_count;           // Count of files detected
-    
-    // SD State Machine - with proper initialization
-    localparam SD_IDLE = 0;
-    localparam SD_SEND_DUMMY = 1;
-    localparam SD_CMD0 = 2;
-    localparam SD_CMD0_RESP = 3;
-    localparam SD_INIT_DONE = 4;
-    localparam SD_SEND_CMD17 = 5;
-    localparam SD_WAIT_TOKEN = 6;
-    localparam SD_READ_DATA = 7;
-    localparam SD_SCAN_COMPLETE = 8;
-    
-    reg [3:0] sd_state;
-    reg [15:0] sector_num;          // Current sector being read (start at 8192)
-    reg [8:0] byte_index;           // Index within 512-byte sector
-    reg [7:0] cmd17_index;          // Index for sending CMD17 (0-5)
-    reg [31:0] read_addr;           // Sector address for CMD17
-    reg [87:0] pattern_buf;         // 11-byte sliding window for "GAMEx   A78"
-    reg [4:0] entry_offset;         // Offset within 32-byte directory entry
     reg sd_init_done;
     
-    // CMD17 command bytes (will be populated dynamically)
-    reg [7:0] cmd17 [0:5];
+    // State machine to scan for game files
+    localparam SD_WAIT_INIT = 0;
+    localparam SD_START_READ = 1;
+    localparam SD_READ_SECTOR = 2;
+    localparam SD_SCAN_DATA = 3;
+    localparam SD_NEXT_SECTOR = 4;
+    localparam SD_DONE = 5;
+    
+    reg [2:0] sd_state;
+    reg [31:0] sector_num;          // 32-bit sector number
+    reg [8:0] byte_index;
+    reg [87:0] pattern_buf;         // 11-byte sliding window for "GAMEx   A78"
+    reg sd_byte_available_d;        // Delayed signal for edge detection
     
     always @(posedge sys_clk or negedge pll_lock) begin
         if (!pll_lock) begin
-            sd_state <= SD_IDLE;
-            sd_cmd_start <= 0;
-            sector_num <= 8192;         // Start at typical FAT32 root location
+            sd_byte_available_d <= 0;
+            sd_state <= SD_WAIT_INIT;
+            sd_rd <= 0;
+            sector_num <= 2050;     // Files at sector ~2055 per grep
             byte_index <= 0;
             files_found <= 0;
             file_count <= 0;
             sd_init_done <= 0;
-            cmd17_index <= 0;
+            pattern_buf <= 0;
+            sd_address <= 0;
         end else begin
-            // Default: don't start commands
-            if (!sd_busy && sd_cmd_start) begin
-                sd_cmd_start <= 0;  // Clear start after one cycle
-            end
+            sd_byte_available_d <= sd_byte_available; // Update delayed signal
             
             case (sd_state)
-                SD_IDLE: begin
-                    // Initial power-up delay
-                    if (byte_index < 100) begin
-                        byte_index <= byte_index + 1;
-                    end else begin
-                        sd_state <= SD_SEND_DUMMY;
-                        byte_index <= 0;
+                SD_WAIT_INIT: begin
+                    // Wait for card initialization (status == IDLE)
+                    if (sd_ready && sd_status == 6) begin  // 6 = IDLE state
+                        sd_state <= SD_START_READ;
                     end
                 end
                 
-                SD_SEND_DUMMY: begin
-                    // Send dummy clocks (80+ clocks = 10 bytes minimum)
-                    if (sd_data_valid) begin
-                        // Previous byte completed
-                        if (byte_index < 20) begin
-                            byte_index <= byte_index + 1;
-                        end else begin
-                            sd_state <= SD_CMD0;
-                            byte_index <= 0;
-                            cmd17_index <= 0;
-                        end
-                    end else if (!sd_busy && !sd_cmd_start) begin
-                        // Send next dummy byte
-                        sd_cmd_byte <= 8'hFF;
-                        sd_cmd_start <= 1;
-                    end
-                end
-                
-                SD_CMD0: begin
-                    // Send CMD0: 0x40 0x00 0x00 0x00 0x00 0x95 (GO_IDLE_STATE)
-                    if (!sd_busy && !sd_cmd_start && cmd17_index < 6) begin
-                        case (cmd17_index)
-                            0: sd_cmd_byte <= 8'h40;  // CMD0
-                            1: sd_cmd_byte <= 8'h00;
-                            2: sd_cmd_byte <= 8'h00;
-                            3: sd_cmd_byte <= 8'h00;
-                            4: sd_cmd_byte <= 8'h00;
-                            5: sd_cmd_byte <= 8'h95;  // Valid CRC for CMD0
-                        endcase
-                        sd_cmd_start <= 1;
-                        cmd17_index <= cmd17_index + 1;
-                    end else if (cmd17_index >= 6) begin
-                        sd_state <= SD_CMD0_RESP;
-                        byte_index <= 0;
-                    end
-                end
-                
-                SD_CMD0_RESP: begin
-                    // Wait for R1 response (should be 0x01 for idle state)
-                    if (!sd_busy && !sd_cmd_start && byte_index < 10) begin
-                        sd_cmd_byte <= 8'hFF;
-                        sd_cmd_start <= 1;
-                        byte_index <= byte_index + 1;
-                    end else if (byte_index >= 10) begin
-                        // Skip full init for now, assume card is ready
-                        sd_state <= SD_INIT_DONE;
-                        byte_index <= 0;
-                    end
-                end
-                
-                SD_INIT_DONE: begin
-                    // Card initialized, prepare to read
-                    sd_state <= SD_SEND_CMD17;
+                SD_START_READ: begin
+                    // Start reading a sector (SDHC: direct sector addressing)
+                    sd_address <= sector_num;
+                    sd_rd <= 1;
                     byte_index <= 0;
-                    
-                    // Prepare CMD17 to read sector_num
-                    // CMD17 format: 0x51 [A31-A24] [A23-A16] [A15-A8] [A7-A0] 0xFF
-                    read_addr <= {16'h0000, sector_num};  // Sector to byte address
-                    cmd17[0] <= 8'h51;                     // CMD17
-                    cmd17[1] <= read_addr[31:24];
-                    cmd17[2] <= read_addr[23:16];
-                    cmd17[3] <= read_addr[15:8];
-                    cmd17[4] <= read_addr[7:0];
-                    cmd17[5] <= 8'hFF;                     // Dummy CRC
-                    cmd17_index <= 0;
-                end
-                
-                SD_SEND_CMD17: begin
-                    // Send CMD17 bytes
-                    if (!sd_busy && !sd_cmd_start) begin
-                        if (cmd17_index < 6) begin
-                            sd_cmd_byte <= cmd17[cmd17_index];
-                            sd_cmd_start <= 1;
-                            cmd17_index <= cmd17_index + 1;
-                        end else begin
-                            sd_state <= SD_WAIT_TOKEN;
-                            byte_index <= 0;
-                        end
+                    pattern_buf <= 0;
+                    if (!sd_ready) begin  // Wait for controller to start (sd_ready drops)
+                        sd_rd <= 0;
+                        sd_state <= SD_SCAN_DATA;
                     end
                 end
                 
-                SD_WAIT_TOKEN: begin
-                    // Wait for 0xFE data token
-                    if (!sd_busy && !sd_cmd_start) begin
-                        sd_cmd_byte <= 8'hFF;  // Send dummy byte
-                        sd_cmd_start <= 1;
-                    end else if (sd_data_valid) begin
-                        if (sd_resp_byte == 8'hFE) begin
-                            // Got data token, start reading
-                            sd_state <= SD_READ_DATA;
-                            byte_index <= 0;
-                            pattern_buf <= 0;
-                            entry_offset <= 0;
-                        end else if (byte_index > 100) begin
-                            // Timeout - skip to next sector or finish
-                            if (sector_num < 8200 && file_count < 6) begin
-                                sector_num <= sector_num + 1;
-                                sd_state <= SD_IDLE;
-                            end else begin
-                                sd_state <= SD_SCAN_COMPLETE;
-                            end
-                        end else begin
-                            byte_index <= byte_index + 1;
-                        end
+                SD_READ_SECTOR: begin
+                    sd_rd <= 0;  // Clear read request after one cycle
+                    if (!sd_ready) begin  // Controller is now reading
+                        sd_state <= SD_SCAN_DATA;
                     end
                 end
                 
-                SD_READ_DATA: begin
-                    // Read 512 bytes + 2 CRC, scanning for patterns
-                    if (!sd_busy && !sd_cmd_start && byte_index < 514) begin
-                        sd_cmd_byte <= 8'hFF;
-                        sd_cmd_start <= 1;
-                    end else if (sd_data_valid && byte_index < 512) begin
-                        // Shift pattern buffer
-                        pattern_buf <= {pattern_buf[79:0], sd_resp_byte};
-                        entry_offset <= entry_offset + 1;
+                SD_SCAN_DATA: begin
+                    // Detect rising edge of sd_byte_available
+                    if (sd_byte_available && !sd_byte_available_d) begin
+                        // Shift new byte into pattern buffer
+                        pattern_buf <= {pattern_buf[79:0], sd_dout};
+                        byte_index <= byte_index + 1;
                         
-                        // Check if we've accumulated 11 bytes for pattern match
-                        if (entry_offset >= 10) begin
-                            // Check for "GAME0   A78" through "GAME5   A78"
+                        // Check for "GAMEx   A78" pattern after receiving 11 bytes
+                        if (byte_index >= 10) begin
                             if (pattern_buf[87:80] == "G" && 
                                 pattern_buf[79:72] == "A" &&
                                 pattern_buf[71:64] == "M" &&
                                 pattern_buf[63:56] == "E" &&
-                                (pattern_buf[55:48] >= "0" && pattern_buf[55:48] <= "5") &&
+                               (pattern_buf[55:48] >= "0" && pattern_buf[55:48] <= "5") &&
                                 pattern_buf[47:40] == " " &&
                                 pattern_buf[39:32] == " " &&
                                 pattern_buf[31:24] == " " &&
                                 pattern_buf[23:16] == "A" &&
                                 pattern_buf[15:8] == "7" &&
                                 pattern_buf[7:0] == "8") begin
-                                // Found a match! Mark the file
-                                // Extract file number: pattern_buf[55:48] is '0'-'5' (48-53)
-                                files_found[pattern_buf[50:48]] <= 1;  // Subtract 48 to get 0-5
-                                file_count <= file_count + 1;
+                                // Found a game file!
+                                files_found[pattern_buf[55:48] - "0"] <= 1;
+                                if (!files_found[pattern_buf[55:48] - "0"])
+                                    file_count <= file_count + 1;
                             end
                         end
-                        
-                        byte_index <= byte_index + 1;
-                    end else if (byte_index >= 514) begin
-                        // Finished reading this sector
-                        if (file_count >= 6 || sector_num >= 8200) begin
-                            sd_state <= SD_SCAN_COMPLETE;
-                            sd_init_done <= 1;
-                        end else begin
-                            // Try next sector
-                            sector_num <= sector_num + 1;
-                            sd_state <= SD_IDLE;
-                            byte_index <= 0;
-                        end
+                    end
+                    
+                    if (sd_ready) begin  // Read complete
+                        sd_state <= SD_NEXT_SECTOR;
                     end
                 end
                 
-                SD_SCAN_COMPLETE: begin
-                    sd_init_done <= 1;
-                    // Stay here, file detection complete
+                SD_NEXT_SECTOR: begin
+                    // Scan 100 sectors (files at ~2055 per grep)
+                    if (file_count >= 6 || sector_num >= (2050 + 100)) begin
+                        sd_state <= SD_DONE;
+                        sd_init_done <= 1;
+                    end else begin
+                        sector_num <= sector_num + 1;
+                        sd_state <= SD_START_READ;
+                    end
                 end
                 
-                default: sd_state <= SD_IDLE;
+                SD_DONE: begin
+                    sd_init_done <= 1;
+                end
             endcase
         end
     end
@@ -503,12 +410,13 @@ module top (
     
     wire led4_blink = (blink_phase > 0 && blink_phase <= file_count) ? blink_counter[23] : 1'b1;
     
-    // LED Assignments (DEBUG MODE - showing SD state)
-    assign led[0] = ~state_a15;                           // A15 (RAM/TIA access)
-    assign led[1] = ~state_pokey;                         // POKEY activity
-    assign led[2] = ~sd_state[0];                         // SD State bit 0 (DEBUG)
-    assign led[3] = ~sd_state[1];                         // SD State bit 1 (DEBUG)
-    assign led[4] = ~sd_state[2];                         // SD State bit 2 (DEBUG)
-    assign led[5] = ~state_oe;                            // Bus Drive activity
+    // LED Assignments (FILE COUNT MODE)
+    // Active LOW LEDs - Show our SD state machine status
+    assign led[0] = ~sd_state[0];                         // Our state bit 0
+    assign led[1] = ~sd_state[1];                         // Our state bit 1  
+    assign led[2] = ~sd_state[2];                         // Our state bit 2
+    assign led[3] = ~sd_ready;                            // SD controller ready (ON when ready)
+    assign led[4] = ~sd_rd;                               // Read request active
+    assign led[5] = ~sd_byte_available;                   // Byte available pulse
 
 endmodule

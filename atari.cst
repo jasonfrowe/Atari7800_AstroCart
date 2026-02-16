@@ -88,17 +88,17 @@ IO_LOC "led[5]" 16;
 IO_PORT "led[5]" IO_TYPE=LVCMOS18 PULL_MODE=UP DRIVE=8;
 
 // --- MicroSD Card (SPI Mode) ---
-IO_LOC "sd_clk" 36;      // TF_SCLK: IOB29B
-IO_PORT "sd_clk" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_LOC "sd_cs" 38;       // TF_CS: IOB31B (chip select, active low)
+IO_PORT "sd_cs" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
 
 IO_LOC "sd_mosi" 37;     // TF_MOSI: IOB31A
 IO_PORT "sd_mosi" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
 
-IO_LOC "sd_cs_n" 38;     // TS_CS: IOB31B
-IO_PORT "sd_cs_n" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_LOC "sd_miso" 39;     // TF_MISO: IOB33A  
+IO_PORT "sd_miso" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 
-IO_LOC "sd_miso" 39;     // TF_MISO: IOB33A
-IO_PORT "sd_miso" IO_TYPE=LVCMOS33 PULL_MODE=NONE; // Input
+IO_LOC "sd_clk" 36;      // TF_SCLK: IOB29B
+IO_PORT "sd_clk" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
 
 // --- PSRAM PINS ---
 // NOTE: PSRAM pins are NOT defined in this CST file!
