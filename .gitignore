@@ -1,7 +1,7 @@
 # Generated ROM files
 game.hex
-*.a78
-*.bin
+mapper.hex
+menu_rom.bin
 
 # FPGA build outputs
 *.json
@@ -13,6 +13,14 @@ game.hex
 *.rpt
 *.log
 *.txt
+
+# 7800basic build outputs
+menu/*.a78
+menu/*.bin
+menu/*.asm
+menu/*.sym
+menu/*.list.txt
+menu/*.dbg
 
 # Python
 __pycache__/
@@ -35,4 +43,27 @@ ENV/
 # Backup files
 *.bak
 *.orig
+
+# Keep certain .a78 and .bin files for testing
+*.a78
+!astrowing.a78
+!astrowing.bin
 backup/
+
+menu/7800.asm
+menu/7800basic_variable_redefs.h
+menu/a78info.cfg
+menu/includes.7800
+menu/menu.bas.asm
+menu/menu.bas.list.txt
+menu/menu.bas.symbol.txt
+/cfg/
+
+# Gowin IDE build artifacts
+impl/
+build.tcl
+*.gprj
+*.gws
+*.xml
+
+

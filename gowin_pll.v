@@ -8,9 +8,9 @@ module gowin_pll (
     rPLL #(
         .FCLKIN("27"),
         .DEVICE("GW1NR-9C"),
-        .IDIV_SEL(0),      // Input /1
-        .FBDIV_SEL(2),     // Feedback *3 -> 81MHz
-        .ODIV_SEL(8),      // Output /8
+        .IDIV_SEL(0),      // Input /1 -> 27MHz
+        .FBDIV_SEL(23),    // Feedback *24 -> 648MHz VCO
+        .ODIV_SEL(8),      // Output /8 -> 81MHz
         .DYN_SDIV_SEL(2),  // No dynamic divider
         .PSDA_SEL("0100")  // Phase Shift -90 degrees
     ) pll_inst (
