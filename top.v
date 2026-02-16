@@ -13,12 +13,12 @@ module top (
     // ========================================================================
     // 1. CLOCK GENERATION (Split Domain)
     // ========================================================================
-    wire sys_clk; // 108 MHz (For Audio & PSRAM)
-    wire pll_lock;
+    wire sys_clk, sys_clk_p, pll_lock;
     
     gowin_pll my_pll (
         .clkin(clk),
         .clkout(sys_clk),
+        .clkoutp(sys_clk_p), // New Phase Shifted Clock
         .lock(pll_lock)
     );
 
@@ -82,7 +82,7 @@ module top (
     // 108 MHz / 1.79 MHz = ~60.33. 
     // We use a counter to 60.
     reg [5:0] tick_cnt;
-    wire tick_179 = (tick_cnt == 59);
+    wire tick_179 = (tick_cnt == 44);
     
     always @(posedge sys_clk) begin
         if (tick_179) tick_cnt <= 0; else tick_cnt <= tick_cnt + 1;
