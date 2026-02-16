@@ -8,15 +8,27 @@ module gowin_pll (
     rPLL #(
         .FCLKIN("27"),
         .DEVICE("GW1NR-9C"),
-        .IDIV_SEL(0),      // Input /1 -> 27MHz
-        .FBDIV_SEL(23),    // Feedback *24 -> 648MHz VCO
-        .ODIV_SEL(8),      // Output /8 -> 81MHz
-        .DYN_SDIV_SEL(2),  // No dynamic divider
-        .PSDA_SEL("0100")  // Phase Shift -90 degrees
+        .IDIV_SEL(2),      // Input /3 -> 9MHz
+        .FBDIV_SEL(53),    // Feedback *54 -> 486MHz VCO
+        .ODIV_SEL(6),      // Output /6 -> 81MHz
+        .DYN_SDIV_SEL(2),
+        .CLKFB_SEL("internal"),
+        .CLKOUT_BYPASS("false"),
+        .CLKOUTP_BYPASS("true"), // Disable P-Clock for now
+        .CLKOUTD_BYPASS("true"),
+        .DYN_DA_EN("false"),     // Disable Dynamic
+        .DUTYDA_SEL("1000"),
+        .PSDA_SEL("0000"),
+        .CLKOUT_FT_DIR(1'b1),
+        .CLKOUTP_FT_DIR(1'b1),
+        .CLKOUT_DLY_STEP(0),
+        .CLKOUTP_DLY_STEP(0),
+        .CLKOUTD_SRC("CLKOUT"),
+        .CLKOUTD3_SRC("CLKOUT")
     ) pll_inst (
         .CLKIN(clkin),
         .CLKOUT(clkout),
-        .CLKOUTP(clkoutp), // The shifted clock
+        .CLKOUTP(clkoutp),
         .LOCK(lock),
         .RESET(1'b0),
         .RESET_P(1'b0),

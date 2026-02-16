@@ -107,7 +107,7 @@ check_input
  ;
  if joy0up then selected_game = selected_game - 1 : joy_delay = 15
  if joy0down then selected_game = selected_game + 1 : joy_delay = 15
- if joy0fire0 then gosub select_game
+ if joy0fire0 then gosub select_game : joy_delay = 15
  
  ;
  ; Keep selected_game in bounds

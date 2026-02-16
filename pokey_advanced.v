@@ -1,4 +1,4 @@
-module pokey_complete (
+module pokey_advanced (
     input clk,              // 27MHz System Clock
     input enable_179mhz,    // 1.79MHz Tick Enable (Main heartbeat)
     input reset_n,          // Active Low Reset
