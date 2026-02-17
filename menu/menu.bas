@@ -70,7 +70,7 @@ draw_title
  ; Draw title and instructions
  ;
  plotchars 'GAME LOADER' 0 60 0
- plotchars 'SELECT A GAME' 1 60 2
+ plotchars 'SELECT A GAME' 1 56 2
  return
 
 draw_game_list
@@ -89,10 +89,14 @@ draw_hud
  plotchars $7F10 1 10 14 11
  plotchars $7F20 1 10 15 13
  plotchars $7F30 1 10 16 13
- plotchars $4440 1 10 17 5
- plotchars $4450 1 40 17 5
- plotchars $4460 1 70 17 5
- plotchars $4470 1 100 17 5
+ plotchars $7F40 1 10 17 5
+ plotchars $7F50 1 50 17 5
+ plotchars $7F60 1 80 17 5
+ plotchars $7F70 1 110 17 5
+ plotchars $7F80 1 10 18 13
+ plotchars $7F90 1 50 18 5
+ plotchars $7FA0 1 80 18 5
+ plotchars $7FB0 1 110 18 5
  return
 
 

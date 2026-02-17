@@ -1,6 +1,6 @@
 module gowin_pll (
     input  clkin,
-    output clkout,  // 81MHz for PSRAM IP
+    output clkout,  // 54MHz for PSRAM IP
     output clkoutp, // Not used with Gowin IP
     output lock
 );
@@ -9,8 +9,8 @@ module gowin_pll (
         .FCLKIN("27"),
         .DEVICE("GW1NR-9C"),
         .IDIV_SEL(0),       // Input divider: 27/(0+1) = 27MHz
-        .FBDIV_SEL(2),      // Feedback: 27*3 = 81MHz (VCO=648MHz with ODIV)
-        .ODIV_SEL(8),       // Output divider: gives 81MHz
+        .FBDIV_SEL(1),      // Feedback: 27*2 = 54MHz
+        .ODIV_SEL(8),       // Output divider: gives 54MHz
         .DYN_SDIV_SEL(2),
         .CLKFB_SEL("internal"),
         .CLKOUT_BYPASS("false"),

@@ -86,12 +86,12 @@ module top (
              data_out <= psram_read_latch; 
         end else begin
             // --- DIAGNOSTIC ROM OVERRIDE ---
-            // Range 1: $7F00-$7F3F (CRC, SC, etc)
-            // Range 2: $4440-$447F (P0-P4 Peaks)
-            if ((a_safe >= 16'h7F00 && a_safe <= 16'h7F3F) || (a_safe >= 16'h4440 && a_safe <= 16'h447F)) begin
-                // Use a_safe[6:4] to select the row
-                case (a_safe[6:4])
-                    3'b000: begin // $7F00-$7F0F: CRC
+            // Use $7F00-$7FBF range (all zeros in menu.bin - safe)
+            // Use a_safe[7:4] for nibble-based addressing (0-B = 12 outputs)
+            if (a_safe >= 16'h7F00 && a_safe <= 16'h7FBF) begin
+                // Use a_safe[7:4] to select the diagnostic output (0-B = 12 outputs)
+                case (a_safe[7:4])
+                    4'h0: begin // $x400: CRC
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h43; // 'C'
                             4'h1: data_out <= 8'h52; // 'R'
@@ -109,7 +109,7 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    3'b001: begin // $7F10-$7F1F: ST/BC
+                    4'h1: begin // $x410: ST/BC
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h53; // 'S'
                             4'h1: data_out <= 8'h54; // 'T'
@@ -125,7 +125,7 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    3'b010: begin // $7F20-$7F2F: SC/L
+                    4'h2: begin // $x420: SC/L
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h53; // 'S'
                             4'h1: data_out <= 8'h43; // 'C'
@@ -140,7 +140,7 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    3'b011: begin // $7F30-$7F3F: First Bytes Peak
+                    4'h3: begin // $x430: First Bytes Peak
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h48; // 'H'
                             4'h1: data_out <= 8'h3A; // ':'
@@ -158,27 +158,31 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    3'b100: begin // $4440: P0:EE (Static Test)
+                    4'h4: begin // $x440: P0:XX (IP State + Init)
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h30; // '0'
                             4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= 8'h45; // 'E'
-                            4'h4: data_out <= 8'h45; // 'E'
+                            4'h3: data_out <= (ip_init_calib ? 8'h49 : 8'h2D); // 'I' or '-'
+                            4'h4: data_out <= (ip_state == IP_WAIT_INIT) ? 8'h57 :  // 'W'
+                                              (ip_state == IP_IDLE) ? 8'h49 :        // 'I'
+                                              (ip_state == IP_ACTIVE) ? 8'h41 : 8'h3F; // 'A' or '?'
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    3'b101: begin // $4450: P1:XX (Trigger Count)
+                    4'h5: begin // $x450: P1:XX (Wait counter + sync status)
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h31; // '1'
                             4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(trigger_counter[7:4]);
-                            4'h4: data_out <= to_hex_ascii(trigger_counter[3:0]);
+                            4'h3: data_out <= to_hex_ascii(ip_wait_count[3:0]); // Wait counter
+                            4'h4: data_out <= rd_valid_sync_pulse ? 8'h56 :      // 'V' if pulse detected
+                                              rd_valid_sync[1] ? 8'h48 :         // 'H' if high
+                                              8'h2D;                              // '-' if low
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    3'b110: begin // $7F60: P2:XX
+                    4'h6: begin // $x460: P2:XX
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h32; // '2'
@@ -188,7 +192,7 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    3'b111: begin // $7F70: P3:XX
+                    4'h7: begin // $x470: P3:XX
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h33; // '3'
@@ -198,6 +202,51 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
+                    4'h8: begin // $x480: P4:XX (address debug)
+                        case (a_safe[3:0])
+                            4'h0: data_out <= 8'h50; // 'P'
+                            4'h1: data_out <= 8'h34; // '4'
+                            4'h2: data_out <= 8'h3A; // ':'
+                            4'h3: data_out <= to_hex_ascii(a_safe[15:12]); // Address high nibble
+                            4'h4: data_out <= to_hex_ascii(a_safe[11:8]);
+                            4'h5: data_out <= to_hex_ascii(a_safe[7:4]);
+                            4'h6: data_out <= to_hex_ascii(a_safe[3:0]);   // Address low nibble
+                            4'h7: data_out <= (game_loaded ? 8'h47 : 8'h2D); // 'G' if game_loaded, '-' if not
+                            4'h8: data_out <= (is_psram_diag4 ? 8'h44 : 8'h2D); // 'D' if diag4 detected
+                            default: data_out <= 8'h20;
+                        endcase
+                    end
+                    4'h9: begin // $x490: P5:XX (IP raw valid + init)
+                        case (a_safe[3:0])
+                            4'h0: data_out <= 8'h50; // 'P'
+                            4'h1: data_out <= 8'h35; // '5'
+                            4'h2: data_out <= 8'h3A; // ':'
+                            4'h3: data_out <= (ip_rd_data_valid ? 8'h52 : 8'h2D); // 'R' if raw valid, '-' if not
+                            4'h4: data_out <= (ip_init_calib ? 8'h49 : 8'h2D);    // 'I' if init, '-' if not
+                            default: data_out <= 8'h20;
+                        endcase
+                    end
+                    4'hA: begin // $x4A0: P6:XX (ip_rd_data[7:0])
+                        case (a_safe[3:0])
+                            4'h0: data_out <= 8'h50; // 'P'
+                            4'h1: data_out <= 8'h36; // '6'
+                            4'h2: data_out <= 8'h3A; // ':'
+                            4'h3: data_out <= to_hex_ascii(ip_rd_data[7:4]);
+                            4'h4: data_out <= to_hex_ascii(ip_rd_data[3:0]);
+                            default: data_out <= 8'h20;
+                        endcase
+                    end
+                    4'hB: begin // $x4B0: P7:XX (cmd_en + psram_cmd_valid)
+                        case (a_safe[3:0])
+                            4'h0: data_out <= 8'h50; // 'P'
+                            4'h1: data_out <= 8'h37; // '7'
+                            4'h2: data_out <= 8'h3A; // ':'
+                            4'h3: data_out <= (ip_cmd_en ? 8'h45 : 8'h2D);        // 'E' if cmd_en, '-' if not
+                            4'h4: data_out <= (psram_cmd_valid ? 8'h56 : 8'h2D);  // 'V' if valid, '-' if not
+                            default: data_out <= 8'h20;
+                        endcase
+                    end
+                    default: data_out <= 8'h20;
                 endcase
             end
             else if (rom_index < 49152) data_out <= rom_memory[rom_index];
@@ -306,10 +355,14 @@ module top (
     wire psram_cmd_write = psram_wr_req;
     wire [21:0] psram_cmd_addr = {6'b0, psram_addr_mux};
     
-    wire is_psram_diag0 = (!game_loaded && a_safe >= 16'h4440 && a_safe <= 16'h444F);
-    wire is_psram_diag1 = (!game_loaded && a_safe >= 16'h4450 && a_safe <= 16'h445F);
-    wire is_psram_diag2 = (!game_loaded && a_safe >= 16'h4460 && a_safe <= 16'h446F);
-    wire is_psram_diag3 = (!game_loaded && a_safe >= 16'h4470 && a_safe <= 16'h447F);
+    wire is_psram_diag0 = (!game_loaded && a_safe >= 16'h7F40 && a_safe <= 16'h7F4F);
+    wire is_psram_diag1 = (!game_loaded && a_safe >= 16'h7F50 && a_safe <= 16'h7F5F);
+    wire is_psram_diag2 = (!game_loaded && a_safe >= 16'h7F60 && a_safe <= 16'h7F6F);
+    wire is_psram_diag3 = (!game_loaded && a_safe >= 16'h7F70 && a_safe <= 16'h7F7F);
+    wire is_psram_diag4 = (!game_loaded && a_safe >= 16'h7F80 && a_safe <= 16'h7F8F);
+    wire is_psram_diag5 = (!game_loaded && a_safe >= 16'h7F90 && a_safe <= 16'h7F9F);
+    wire is_psram_diag6 = (!game_loaded && a_safe >= 16'h7FA0 && a_safe <= 16'h7FAF);
+    wire is_psram_diag7 = (!game_loaded && a_safe >= 16'h7FB0 && a_safe <= 16'h7FBF);
     
     wire [21:0] psram_addr_mux = (game_loaded)   ? {6'b0, a_safe} - 22'h004000 : 
                                  (is_psram_diag0) ? 22'h000000 : 
@@ -348,6 +401,21 @@ module top (
     wire        ip_init_calib;
     wire        ip_clk_out;
     
+    // CDC synchronizers for signals crossing from 54MHz to 27MHz domain
+    reg [2:0] rd_valid_sync;
+    reg [2:0] init_calib_sync;
+    wire rd_valid_sync_pulse;
+    wire init_calib_synced;
+    
+    always @(posedge sys_clk) begin
+        rd_valid_sync <= {rd_valid_sync[1:0], ip_rd_data_valid};
+        init_calib_sync <= {init_calib_sync[1:0], ip_init_calib};
+    end
+    
+    // Detect rising edge of rd_data_valid
+    assign rd_valid_sync_pulse = rd_valid_sync[1] && !rd_valid_sync[2];
+    assign init_calib_synced = init_calib_sync[2];
+    
     // Byte-level conversion logic
     // Address: divide by 4 for 32-bit words, use addr[1:0] for byte select
     assign ip_addr = psram_cmd_addr[21:2];
@@ -373,30 +441,33 @@ module top (
     
     reg [1:0] ip_state;
     reg [7:0] ip_data_buffer;
-    reg [3:0] ip_wait_count;  // Counter for write completion
+    reg [7:0] ip_wait_count;  // Extended to 8-bit for longer timeout
+    reg       ip_is_write;     // Remember if current operation is write
     
     assign psram_dout = ip_data_buffer;
-    assign psram_data_ready = (ip_state == IP_IDLE) && ip_init_calib;
-    assign psram_busy = !ip_init_calib || (ip_state != IP_IDLE) || ip_cmd_en;
+    assign psram_data_ready = (ip_state == IP_IDLE) && init_calib_synced;
+    assign psram_busy = !init_calib_synced || (ip_state != IP_IDLE) || ip_cmd_en;
     
     always @(posedge sys_clk or negedge pll_lock) begin
         if (!pll_lock) begin
             ip_state <= IP_WAIT_INIT;
             ip_cmd_en <= 1'b0;
             ip_data_buffer <= 8'h00;
-            ip_wait_count <= 4'h0;
+            ip_wait_count <= 8'h0;
+            ip_is_write <= 1'b0;
         end else begin
             case (ip_state)
                 IP_WAIT_INIT: begin
-                    if (ip_init_calib) begin
+                    if (init_calib_synced) begin
                         ip_state <= IP_IDLE;
                     end
                 end
                 
                 IP_IDLE: begin
-                    if (psram_cmd_valid && ip_init_calib) begin
+                    if (psram_cmd_valid && init_calib_synced) begin
                         ip_cmd_en <= 1'b1;
-                        ip_wait_count <= 4'h0;
+                        ip_wait_count <= 8'h0;
+                        ip_is_write <= psram_cmd_write;  // Remember command type
                         ip_state <= IP_ACTIVE;
                     end else begin
                         ip_cmd_en <= 1'b0;
@@ -404,15 +475,27 @@ module top (
                 end
                 
                 IP_ACTIVE: begin
-                    ip_cmd_en <= 1'b0;
+                    // Hold cmd_en high for 3 cycles to ensure IP sees it
+                    if (ip_wait_count < 8'd3) begin
+                        ip_cmd_en <= 1'b1;
+                    end else begin
+                        ip_cmd_en <= 1'b0;
+                    end
                     ip_wait_count <= ip_wait_count + 1'b1;
                     
-                    if (ip_rd_data_valid) begin
-                        // Read completed
+                    if (rd_valid_sync_pulse) begin
+                        // Read completed - synchronized edge detect
                         ip_data_buffer <= extracted_byte;
                         ip_state <= IP_IDLE;
-                    end else if (psram_cmd_write && ip_wait_count >= 4'd8) begin
-                        // Write completed after minimum 8 cycles
+                    end else if (ip_is_write && ip_wait_count >= 8'd15) begin
+                        // Write completed after minimum 15 cycles (more conservative)
+                        ip_state <= IP_IDLE;
+                    end else if (!ip_is_write && ip_wait_count >= 8'd50) begin
+                        // Read timeout - something went wrong, recover
+                        ip_data_buffer <= 8'hEE;  // Error marker
+                        ip_state <= IP_IDLE;
+                    end else if (ip_wait_count >= 8'd100) begin
+                        // General timeout - force recovery
                         ip_state <= IP_IDLE;
                     end
                 end
@@ -425,7 +508,7 @@ module top (
     // Instantiate Gowin PSRAM IP (at top level for auto-routing)
     PSRAM_Memory_Interface_HS_Top psram_ip (
         .clk(sys_clk),              // 27MHz system clock
-        .memory_clk(clk_81m),       // 81MHz PSRAM clock
+        .memory_clk(clk_81m),       // 54MHz PSRAM clock
         .pll_lock(pll_lock),        // PLL lock signal
         .rst_n(pll_lock),           // Active-high reset
         
@@ -463,16 +546,25 @@ module top (
     reg diag1_read_done;
     reg diag2_read_done;
     reg diag3_read_done;
+    reg diag4_read_done;
+    reg diag5_read_done;
+    reg diag6_read_done;
+    reg diag7_read_done;
     
     // Detect when we're in any diagnostic region
-    wire in_any_diag = is_psram_diag0 || is_psram_diag1 || is_psram_diag2 || is_psram_diag3;
+    wire in_any_diag = is_psram_diag0 || is_psram_diag1 || is_psram_diag2 || is_psram_diag3 ||
+                       is_psram_diag4 || is_psram_diag5 || is_psram_diag6 || is_psram_diag7;
     
     // Only trigger read once per entry to diagnostic region
     wire diag_read_trigger = !game_loaded && rw_safe && 
                             ((is_psram_diag0 && !diag0_read_done) ||
                              (is_psram_diag1 && !diag1_read_done) ||
                              (is_psram_diag2 && !diag2_read_done) ||
-                             (is_psram_diag3 && !diag3_read_done));
+                             (is_psram_diag3 && !diag3_read_done) ||
+                             (is_psram_diag4 && !diag4_read_done) ||
+                             (is_psram_diag5 && !diag5_read_done) ||
+                             (is_psram_diag6 && !diag6_read_done) ||
+                             (is_psram_diag7 && !diag7_read_done));
     
     reg [7:0] trigger_counter;
     
@@ -486,6 +578,10 @@ module top (
             diag1_read_done <= 0;
             diag2_read_done <= 0;
             diag3_read_done <= 0;
+            diag4_read_done <= 0;
+            diag5_read_done <= 0;
+            diag6_read_done <= 0;
+            diag7_read_done <= 0;
         end
         
         if (!sd_reset) begin
@@ -500,13 +596,17 @@ module top (
                        if (is_psram_diag1) diag1_read_done <= 1;
                        if (is_psram_diag2) diag2_read_done <= 1;
                        if (is_psram_diag3) diag3_read_done <= 1;
+                       if (is_psram_diag4) diag4_read_done <= 1;
+                       if (is_psram_diag5) diag5_read_done <= 1;
+                       if (is_psram_diag6) diag6_read_done <= 1;
+                       if (is_psram_diag7) diag7_read_done <= 1;
                    end
              end
              else if (psram_busy) begin 
-                   // Acknowledged by 81MHz PSRAM domain
+                   // Acknowledged by 54MHz PSRAM domain
                    psram_rd_req <= 0; 
              end
-             else if (!game_loaded) psram_rd_req <= 0; // Menu Mode safety
+             else if (!game_loaded && !in_any_diag) psram_rd_req <= 0; // Menu Mode safety (but allow diagnostics)
         end
     end
 
