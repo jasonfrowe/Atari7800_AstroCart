@@ -303,12 +303,18 @@ module top (
     reg loading_phase;
     reg game_loaded;
         
-    // Simple Single-Sector Loader (Step 1)
+    // Simplified Sequential Loader (Full Implementation)
     localparam SD_IDLE       = 0;
     localparam SD_START      = 1;
     localparam SD_WAIT       = 2;
     localparam SD_DATA       = 3;
-    localparam SD_DONE       = 4;
+    localparam SD_NEXT       = 4;
+    localparam SD_COMPLETE   = 5;
+
+    // Game constants (astrowing.a78 = 48KB + 128b Header = 97 Sectors)
+    localparam GAME_SIZE_SECTORS = 97;
+    
+    reg [6:0] current_sector;
     
     always @(posedge sys_clk) begin
         if (sd_reset) begin
@@ -320,6 +326,9 @@ module top (
              led_0_toggle <= 0;
              game_loaded <= 0;
              psram_wr_req <= 0;
+             
+             current_sector <= 0;
+             psram_load_addr <= 0;
              sd_byte_available_d <= 0;
              pattern_buf <= 0;
         end else begin
@@ -331,7 +340,7 @@ module top (
                  end
                  
                  SD_START: begin
-                     sd_address <= 0; // Sector 0
+                     sd_address <= current_sector;
                      sd_rd <= 1;
                      byte_index <= 0;
                      sd_state <= SD_WAIT;
@@ -347,21 +356,42 @@ module top (
                  SD_DATA: begin
                      if (sd_ready && byte_index < 512) begin
                          // Abort
-                         sd_state <= SD_DONE;
+                         sd_state <= SD_NEXT; 
                          led_debug_byte <= 8'hFF; // Error
                      end else if (sd_byte_available && !sd_byte_available_d) begin
-                         if (byte_index == 0) begin
-                              led_debug_byte <= sd_dout; // Capture first byte
-                              led_0_toggle <= 1; // Signal Logic 1
+                         // Data Byte Received
+                         
+                         // WRITE TO PSRAM (Skip 128-byte Header in Sector 0)
+                         if (current_sector > 0 || byte_index >= 128) begin
+                             psram_wr_req <= 1;
+                             psram_load_addr <= psram_load_addr + 1;
                          end
+                         
                          byte_index <= byte_index + 1;
-                         if (byte_index == 511) sd_state <= SD_DONE;
+                         
+                         if (byte_index == 511) begin
+                             sd_state <= SD_NEXT;
+                         end
+                     end else begin
+                         psram_wr_req <= 0; // Clear Write Request
                      end
                  end
                  
-                 SD_DONE: begin
-                     // Stay here. LED 0 Toggle ON.
-                     led_0_toggle <= 1;
+                 SD_NEXT: begin
+                     psram_wr_req <= 0;
+                     if (current_sector >= GAME_SIZE_SECTORS - 1) begin
+                         sd_state <= SD_COMPLETE;
+                     end else begin
+                         current_sector <= current_sector + 1;
+                         sd_state <= SD_START;
+                     end
+                 end
+                 
+                 SD_COMPLETE: begin
+                     // Load Done. 
+                     // DO NOT TRIGGER GAME.
+                     // Just sit here.
+                     led_0_toggle <= 0; // Stop toggling? Or set to Done state.
                  end
              endcase
         end
@@ -478,13 +508,13 @@ module top (
         end
     end
 
-    // LED Assignments (Single Sector Debug Mode)
+    // LED Assignments (Full Loader Mode)
     // Active LOW LEDs. 
-    assign led[0] = ~led_0_toggle;              // ON when Data Byte 0 Received
+    assign led[0] = ~(sd_state != SD_COMPLETE); // ON if Loading. OFF if Complete.
     assign led[1] = ~pll_lock;                  // ON if PLL Locked
-    assign led[2] = ~sd_state[0];               // State Bit 0
-    assign led[3] = ~sd_state[1];               // State Bit 1
-    assign led[4] = ~sd_state[2];               // State Bit 2
-    assign led[5] = ~game_loaded;               // ON if Game Mode (Should be OFF)
+    assign led[2] = ~current_sector[4];         // Sector Progress Bit 4
+    assign led[3] = ~current_sector[5];         // Sector Progress Bit 5
+    assign led[4] = ~current_sector[6];         // Sector Progress Bit 6
+    assign led[5] = ~game_loaded;               // ON if Game Mode
     
 endmodule
