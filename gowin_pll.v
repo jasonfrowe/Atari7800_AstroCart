@@ -8,13 +8,13 @@ module gowin_pll (
     rPLL #(
         .FCLKIN("27"),
         .DEVICE("GW1NR-9C"),
-        .IDIV_SEL(2),      // Input /3 -> 9MHz
-        .FBDIV_SEL(53),    // Feedback *54 -> 486MHz VCO
-        .ODIV_SEL(6),      // Output /6 -> 81MHz
+        .IDIV_SEL(0),      // From zf3 reference
+        .FBDIV_SEL(2),     // From zf3 reference  
+        .ODIV_SEL(8),      // From zf3 reference -> 81MHz
         .DYN_SDIV_SEL(2),
         .CLKFB_SEL("internal"),
         .CLKOUT_BYPASS("false"),
-        .CLKOUTP_BYPASS("true"), // Disable P-Clock for now
+        .CLKOUTP_BYPASS("false"), // Enable P-Clock for HyperRAM
         .CLKOUTD_BYPASS("true"),
         .DYN_DA_EN("false"),     // Disable Dynamic
         .DUTYDA_SEL("1000"),

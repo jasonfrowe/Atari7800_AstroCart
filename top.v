@@ -20,7 +20,10 @@ module top (
     output       sd_clk,    // SPI Clock
     
     output       audio,     // Audio PWM
-    output [5:0] led        // Debug LEDs
+    output [5:0] led,       // Debug LEDs
+    
+    inout [7:0]       IO_psram_dq,
+    inout wire        IO_psram_rwds
 );
 
     // ========================================================================
@@ -54,10 +57,14 @@ module top (
 
     wire [15:0] rom_index = a_safe - 16'h4000;
 
-    // ROM Fetch (High Speed)
+    // ROM Fetch (High Speed) / PSRAM Read
     always @(posedge sys_clk) begin
-        if (rom_index < 49152) data_out <= rom_memory[rom_index];
-        else data_out <= 8'hFF;
+        if (game_loaded) begin
+             data_out <= psram_dout_bus; // Read from PSRAM latch/wire
+        end else begin
+            if (rom_index < 49152) data_out <= rom_memory[rom_index];
+            else data_out <= 8'hFF;
+        end
     end
     
     // Decoders (Using SAFE address)
@@ -130,23 +137,91 @@ module top (
     // 6. SD CARD - calint sd_controller (Tang 9K proven)
     // ========================================================================
     
-    // SD Card - MIT sd_controller (Tang 9K compatible)
-    // Direct rd/wr interface
+    // Power-on reset for SD controller
+    // Use PLL lock as reset - gives ~50ms initialization time
+    wire sd_reset = !pll_lock;
+
+    // ========================================================================
+    // 7. PSRAM CONTROLLER (HyperRAM)
+    // ========================================================================
     
-    // Power-on reset for SD controller - simple counter approach
-    // Counter will eventually overflow and stop, ending reset
-    reg [7:0] reset_counter;
+    wire clk_81m;
+    wire clk_81m_p;
+    wire pll_lock;
+    
+    gowin_pll pll_inst (
+        .clkin(clk),
+        .clkout(clk_81m),
+        .clkoutp(clk_81m_p),
+        .lock(pll_lock)
+    );
+    
+    // PSRAM Signals
+    reg psram_wr_req;
+    reg psram_rd_req;
+    wire [7:0] psram_dout_bus;
+    wire psram_busy;
+    wire psram_data_valid;
+    
+    wire [21:0] psram_addr_mux = game_loaded ? {6'b0, a_safe} : psram_load_addr[21:0];
+    wire [7:0]  psram_din_mux  = sd_dout; // Only write from SD
+    
+    psram_byte_controller psram_ctrl (
+        .clk(clk_81m),
+        .clk_shifted(clk_81m_p),
+        .reset_n(pll_lock),
+        
+        .read_req(psram_rd_req),
+        .write_req(psram_wr_req),
+        .address(psram_addr_mux),
+        .write_data(psram_din_mux),
+        .read_data(psram_dout_bus),
+        .data_valid(psram_data_valid),
+        .busy(psram_busy),
+        
+        // Magic Ports
+        .O_psram_ck(O_psram_ck),
+        .O_psram_ck_n(O_psram_ck_n),
+        .O_psram_cs_n(O_psram_cs_n),
+        .O_psram_reset_n(O_psram_reset_n),
+        .IO_psram_dq(IO_psram_dq),
+        .IO_psram_rwds(IO_psram_rwds)
+    );
+    
+    // PSRAM Read/Write Logic (CDC Handshake)
+    
+    // 1. Read Logic (Game Mode)
+    // Trigger read on rising edge of `should_drive` (Atari Read Request)
+    reg should_drive_d;
+    always @(posedge sys_clk) should_drive_d <= should_drive;
+    wire start_read = should_drive && !should_drive_d; 
+    
+    reg [7:0] psram_latched_data;
     
     always @(posedge sys_clk) begin
-        if (reset_counter != 8'hFF) begin
-            reset_counter <= reset_counter + 1;
+        if (!sd_reset) begin
+             // READ REQUEST
+             if (game_loaded && start_read) begin
+                  psram_rd_req <= 1;
+             end
+             else if (psram_busy) begin 
+                  // Acknowledged by 81MHz domain
+                  psram_rd_req <= 0; 
+                  // psram_wr_req is handled in SD State Machine
+             end
+             
+             // WRITE REQUEST is set in SD State Machine
+             // We need to coordinate with the SD Loop.
+             // See SD State Machine updates.
         end
     end
     
-    // Assert reset only during first ~50 cycles, then deassert forever
-    wire sd_reset = (reset_counter < 8'd50);
-    
-    // Slow clock for SD controller (Internal to SD controller now)
+    // Capture Read Data
+    // Note: read_data from controller is stable until next read.
+    // We can just update psram_latched_data when busy falls?
+    // Or just use psram_dout_bus directly in data_out assignments?
+    // Let's use `psram_dout_bus` directly, as it holds value.
+
     
     // TEST: Direct clock output to verify pin connection
     reg test_clk = 0;
@@ -225,6 +300,7 @@ module top (
     reg [8:0] loading_sector_cnt;
     reg [22:0] psram_load_addr;
     reg header_found;
+    reg loading_phase;
     reg game_loaded;
         
     // State Machine Definitions (Localparams)
@@ -245,7 +321,7 @@ module top (
     always @(posedge sys_clk) begin
         if (sd_reset) begin
             sd_byte_available_d <= 0;
-            sd_state <= SD_WAIT_INIT;
+            sd_state <= SD_LOAD_SEEK;  // Skip scanner, go straight to loader
             sd_rd <= 0;
             sector_num <= 32270;    // Target Sector 32274 (Offset 16524480 / 512)
             byte_index <= 0;
@@ -266,6 +342,11 @@ module top (
             
             // Loader Init
             game_loaded <= 0;
+            loading_phase <= 1;  // Force loader mode immediately
+            header_found <= 0;
+            loading_sector_cnt <= 0;
+            psram_load_addr <= 0;
+            psram_wr_req <= 0;
         end else begin
             sd_byte_available_d <= sd_byte_available; // Update delayed signal
             
@@ -492,30 +573,24 @@ module top (
                 end
 
                 SD_LOAD_DATA: begin
+                    // Clear Write Request if confirmed
+                    if (psram_busy) psram_wr_req <= 0;
+
                     if (sd_ready && byte_index < 512) begin
                         sd_state <= SD_LOAD_NEXT; 
                     end
                     else if (sd_byte_available && !sd_byte_available_d) begin
-                         // Shift into pattern buffer for Header verification
-                        pattern_buf <= {pattern_buf[79:0], sd_dout};
-                        byte_index <= byte_index + 1;
                         
-                        // Check for "ATARI7800" at start of file (Bytes 0-8)
-                        if (byte_index >= 9) begin
-                             if (pattern_buf[71:64] == 8'h41 && // A
-                                 pattern_buf[63:56] == 8'h54 && // T
-                                 pattern_buf[55:48] == 8'h41 && // A
-                                 pattern_buf[47:40] == 8'h52 && // R
-                                 pattern_buf[39:32] == 8'h49 && // I
-                                 pattern_buf[31:24] == 8'h37 && // 7
-                                 pattern_buf[23:16] == 8'h38 && // 8
-                                 pattern_buf[15:8]  == 8'h30 && // 0
-                                 pattern_buf[7:0]   == 8'h30)   // 0
-                             begin
-                                 header_found <= 1;
-                                 sd_state <= SD_GAME_START; // Found it! Stop immediately.
-                             end
+                        // 1. Shift into pattern buffer (Optional debug)
+                        pattern_buf <= {pattern_buf[79:0], sd_dout};
+                        
+                        // 2. PSRAM Write (Blind Load - Skip 128-byte header)
+                        if (loading_sector_cnt > 0 || byte_index >= 128) begin
+                             psram_wr_req <= 1;
+                             psram_load_addr <= psram_load_addr + 1;
                         end
+                        
+                        byte_index <= byte_index + 1;
                     end
                     
                     if (sd_ready) begin
@@ -524,24 +599,26 @@ module top (
                 end
 
                 SD_LOAD_NEXT: begin
-                     // If we are here, we finished a sector.
-                     // Did we find the header?
-                     if (header_found) begin
-                        // This logic is actually skipped because SD_LOAD_DATA jumps to GAME_START on success.
-                        // But if we wanted to continue loading...
-                        // For now, we only want to FIND it.
-                        sd_state <= SD_GAME_START;
+                     if (loading_phase || header_found) begin
+                        // CONTINUOUS LOADING MODE
+                        if (loading_sector_cnt < 512) begin // Load 256KB
+                            sector_num <= sector_num + 1;
+                            loading_sector_cnt <= loading_sector_cnt + 1;
+                            sd_state <= SD_LOAD_SEEK;
+                        end else begin
+                            // Done Loading
+                            sd_state <= SD_GAME_START;
+                        end
                      end else begin
-                        // Header NOT found in this sector.
-                        // Increment Sector and Search Next.
+                        // STILL SEARCHING MODE
                         sector_num <= sector_num + 1;
-                        // Reset everything for next sector
+                        // Reset everything for next sector search
                         byte_index <= 0;
                         pattern_buf <= 0;
-                        loading_sector_cnt <= 0; // Not loading yet
+                        loading_sector_cnt <= 0; 
                         
-                        // Search Limit (e.g. 5000 sectors -> ~2.5MB)
-                        if (sector_num > (32274 + 5000)) begin
+                        // Scan Limit (~2000 sectors)
+                        if (sector_num > (32274 + 2000)) begin
                             sd_state <= SD_DONE; // Give up
                         end else begin
                             sd_state <= SD_LOAD_SEEK;
@@ -550,7 +627,8 @@ module top (
                 end
 
                 SD_GAME_START: begin
-                     game_loaded <= 1; // Success!
+                     game_loaded <= 1; // Play Game!
+                     loading_phase <= 0; // Stop SD control
                      led_debug_byte <= 8'hAA; 
                      sd_init_done <= 1;
                      led_0_toggle <= 1;
@@ -586,6 +664,12 @@ module top (
                          led_0_toggle <= 0; 
                     end
                     sd_init_done <= 1;
+                end
+                
+                default: begin
+                    // Undefined state - reset to WAIT_INIT
+                    sd_state <= SD_WAIT_INIT;
+                    led_debug_byte <= 8'hFF; // Error indicator
                 end
             endcase
         end
@@ -722,10 +806,10 @@ module top (
     // LED Assignments (DIAGNOSTIC MODE)
     // Active LOW LEDs. 
     assign led[0] = ~(capture_active | led_0_toggle); // ON if Found OR Done
-    assign led[1] = ~led_debug_byte[0];         // Data Bit 0
-    assign led[2] = ~led_debug_byte[1];         // Data Bit 1
-    assign led[3] = ~led_debug_byte[2];         // Data Bit 2
-    assign led[4] = ~led_debug_byte[3];         // Data Bit 3
-    assign led[5] = ~game_loaded;               // ON if Header Verified (Game Loaded)
+    assign led[1] = ~pll_lock;                  // ON if PLL Locked (Critical for PSRAM)
+    assign led[2] = ~sd_state[0];               // SD State Bit 0
+    assign led[3] = ~sd_state[1];               // SD State Bit 1
+    assign led[4] = ~sd_state[2];               // SD State Bit 2
+    assign led[5] = ~sd_reset;                  // ON if sd_reset is ACTIVE (should be OFF after bootup)
     
 endmodule
