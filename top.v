@@ -19,18 +19,21 @@ module top (
     input        sd_miso,   // SPI MISO (Master In, Slave Out)
     output       sd_clk,    // SPI Clock
     
-    output       audio,     // Audio PWM
-    output [5:0] led,       // Debug LEDs
+    // PSRAM (Tang Nano 9K - Magic Ports - auto-routed by Gowin)
+    output wire [1:0] O_psram_ck,      // 2-bit Clock (ck_n auto-inferred)
+    output wire [1:0] O_psram_cs_n,    // 2-bit CS#
+    output wire [1:0] O_psram_reset_n, // 2-bit Reset#
+    inout [7:0]       IO_psram_dq,     // 8-bit Data
+    inout [1:0]       IO_psram_rwds,    // 2-bit RWDS
     
-    inout [7:0]       IO_psram_dq,
-    inout wire        IO_psram_rwds
+    output       audio,     // Audio PWM
+    output [5:0] led       // Debug LEDs
 );
 
     // ========================================================================
     // 0. CLOCK GENERATION (No PLL - 27MHz native, Atari crashes with 81MHz)
     // ========================================================================
     wire sys_clk = clk;     // 27MHz native
-    wire pll_lock = 1'b1;   // Always locked (no PLL)
 
     // ========================================================================
     // 1. INPUT SYNCHRONIZATION
@@ -79,12 +82,15 @@ module top (
              data_out <= status_byte;
         end
         else if (game_loaded) begin
-             data_out <= psram_dout_bus; 
+             data_out <= psram_read_latch; 
         end else begin
-            // --- DIAGNOSTIC ROM OVERRIDE ($7F00-$7F3F) ---
-            if (a_safe >= 16'h7F00 && a_safe <= 16'h7F3F) begin
-                case (a_safe[5:4])
-                    2'b00: begin // $7F00-$7F0F: CRC
+            // --- DIAGNOSTIC ROM OVERRIDE ---
+            // Range 1: $7F00-$7F3F (CRC, SC, etc)
+            // Range 2: $4440-$447F (P0-P4 Peaks)
+            if ((a_safe >= 16'h7F00 && a_safe <= 16'h7F3F) || (a_safe >= 16'h4440 && a_safe <= 16'h447F)) begin
+                // Use a_safe[6:4] to select the row
+                case (a_safe[6:4])
+                    3'b000: begin // $7F00-$7F0F: CRC
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h43; // 'C'
                             4'h1: data_out <= 8'h52; // 'R'
@@ -102,7 +108,7 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    2'b01: begin // $7F10-$7F1F: ST/BC
+                    3'b001: begin // $7F10-$7F1F: ST/BC
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h53; // 'S'
                             4'h1: data_out <= 8'h54; // 'T'
@@ -118,7 +124,7 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    2'b10: begin // $7F20-$7F2F: SC
+                    3'b010: begin // $7F20-$7F2F: SC/L
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h53; // 'S'
                             4'h1: data_out <= 8'h43; // 'C'
@@ -133,7 +139,7 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    2'b11: begin // $7F30-$7F3F: First Bytes Peak (Hex String)
+                    3'b011: begin // $7F30-$7F3F: First Bytes Peak
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h48; // 'H'
                             4'h1: data_out <= 8'h3A; // ':'
@@ -151,7 +157,46 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    default: data_out <= 8'h20;
+                    3'b100: begin // $4440: P0:EE (Static Test)
+                        case (a_safe[3:0])
+                            4'h0: data_out <= 8'h50; // 'P'
+                            4'h1: data_out <= 8'h30; // '0'
+                            4'h2: data_out <= 8'h3A; // ':'
+                            4'h3: data_out <= 8'h45; // 'E'
+                            4'h4: data_out <= 8'h45; // 'E'
+                            default: data_out <= 8'h20;
+                        endcase
+                    end
+                    3'b101: begin // $4450: P1:XX (Trigger Count)
+                        case (a_safe[3:0])
+                            4'h0: data_out <= 8'h50; // 'P'
+                            4'h1: data_out <= 8'h31; // '1'
+                            4'h2: data_out <= 8'h3A; // ':'
+                            4'h3: data_out <= to_hex_ascii(trigger_counter[7:4]);
+                            4'h4: data_out <= to_hex_ascii(trigger_counter[3:0]);
+                            default: data_out <= 8'h20;
+                        endcase
+                    end
+                    3'b110: begin // $7F60: P2:XX
+                        case (a_safe[3:0])
+                            4'h0: data_out <= 8'h50; // 'P'
+                            4'h1: data_out <= 8'h32; // '2'
+                            4'h2: data_out <= 8'h3A; // ':'
+                            4'h3: data_out <= to_hex_ascii(psram_read_latch[7:4]);
+                            4'h4: data_out <= to_hex_ascii(psram_read_latch[3:0]);
+                            default: data_out <= 8'h20;
+                        endcase
+                    end
+                    3'b111: begin // $7F70: P3:XX
+                        case (a_safe[3:0])
+                            4'h0: data_out <= 8'h50; // 'P'
+                            4'h1: data_out <= 8'h33; // '3'
+                            4'h2: data_out <= 8'h3A; // ':'
+                            4'h3: data_out <= to_hex_ascii(psram_read_latch[7:4]);
+                            4'h4: data_out <= to_hex_ascii(psram_read_latch[3:0]);
+                            default: data_out <= 8'h20;
+                        endcase
+                    end
                 endcase
             end
             else if (rom_index < 49152) data_out <= rom_memory[rom_index];
@@ -238,47 +283,78 @@ module top (
     // ========================================================================
     
     wire clk_81m;
-    wire clk_81m_p;
+    wire clk_81m_shifted;
     wire pll_lock;
     
     gowin_pll pll_inst (
-        .clkin(clk),
+        .clkin(sys_clk),
         .clkout(clk_81m),
-        .clkoutp(clk_81m_p),
+        .clkoutp(clk_81m_shifted),
         .lock(pll_lock)
     );
     
-    // PSRAM Signals
-    reg psram_wr_req;
+    // PSRAM Signals - original interface
     reg psram_rd_req;
-    wire [7:0] psram_dout_bus;
-    wire psram_busy;
-    wire psram_data_valid;
+    reg psram_wr_req;
     
-    wire [21:0] psram_addr_mux = game_loaded ? {6'b0, a_safe} : psram_load_addr[21:0];
+    // PSRAM Interface Signals
+    wire [7:0] psram_dout;
+    wire psram_data_ready;
+    wire psram_busy;
+    
+    // Bridge logic to controller interface
+    wire psram_cmd_valid = psram_rd_req || psram_wr_req;
+    wire psram_cmd_write = psram_wr_req;
+    wire [21:0] psram_cmd_addr = {6'b0, psram_addr_mux};
+    
+    wire is_psram_diag0 = (!game_loaded && a_safe >= 16'h4440 && a_safe <= 16'h444F);
+    wire is_psram_diag1 = (!game_loaded && a_safe >= 16'h4450 && a_safe <= 16'h445F);
+    wire is_psram_diag2 = (!game_loaded && a_safe >= 16'h4460 && a_safe <= 16'h446F);
+    wire is_psram_diag3 = (!game_loaded && a_safe >= 16'h4470 && a_safe <= 16'h447F);
+    
+    wire [21:0] psram_addr_mux = (game_loaded)   ? {6'b0, a_safe} - 22'h004000 : 
+                                 (is_psram_diag0) ? 22'h000000 : 
+                                 (is_psram_diag1) ? 22'h000001 : 
+                                 (is_psram_diag2) ? 22'h000002 : 
+                                 (is_psram_diag3) ? 22'h000003 : 
+                                 {psram_load_addr[21:0]};
+    
+    reg [7:0] psram_read_latch;
+    reg [2:0] psram_busy_sync;
+    always @(posedge sys_clk) begin
+        psram_busy_sync <= {psram_busy_sync[1:0], psram_busy};
+        // Capture on Fall of Busy (Stable Data)
+        if (!psram_busy_sync[1] && psram_busy_sync[2]) begin
+            psram_read_latch <= psram_dout;
+        end
+    end
     
     // Write Buffer for Reliable Data Transfer
     reg [7:0] write_buffer;
     reg write_pending;
     
-    wire [7:0]  psram_din_mux  = write_buffer; // Buffered Data
+    // V51m: Force Write Pattern A5/5A/85/3C for addresses 0-3
+    wire [7:0] psram_din_mux = (psram_load_addr[21:0] == 0) ? 8'hA5 : 
+                                (psram_load_addr[21:0] == 1) ? 8'h5A : 
+                                (psram_load_addr[21:0] == 2) ? 8'h85 : 
+                                (psram_load_addr[21:0] == 3) ? 8'h3C : 
+                                write_buffer;
     
-    psram_byte_controller psram_ctrl (
+    psram_controller psram_ctrl (
         .clk(clk_81m),
-        .clk_shifted(clk_81m_p),
+        .clk_shifted(clk_81m_shifted),
         .reset_n(pll_lock),
         
-        .read_req(psram_rd_req),
-        .write_req(psram_wr_req),
-        .address(psram_addr_mux),
+        .cmd_valid(psram_cmd_valid),
+        .cmd_write(psram_cmd_write),
+        .cmd_addr(psram_cmd_addr), 
         .write_data(psram_din_mux),
-        .read_data(psram_dout_bus),
-        .data_valid(psram_data_valid),
+        .read_data(psram_dout),
+        .data_ready(psram_data_ready),
         .busy(psram_busy),
         
         // Magic Ports
         .O_psram_ck(O_psram_ck),
-        .O_psram_ck_n(O_psram_ck_n),
         .O_psram_cs_n(O_psram_cs_n),
         .O_psram_reset_n(O_psram_reset_n),
         .IO_psram_dq(IO_psram_dq),
@@ -295,14 +371,24 @@ module top (
     reg [15:0] a_prev;
     reg rw_prev;
     
+    // V51j: Slow Trigger 
+    wire slow_pulse = heartbeat[24]; 
+    reg slow_pulse_prev;
+    always @(posedge sys_clk) slow_pulse_prev <= slow_pulse;
+    // Only fire when heartbeat is high (or transitions high) AND offset 0
+    // V51m: Restore Fast Trigger (Remove slow_pulse gating)
+    wire diag_read_trigger = (is_psram_diag0 || is_psram_diag1 || is_psram_diag2 || is_psram_diag3) && rw_safe && (a_safe != a_prev) && (a_safe[3:0] == 4'h0); // && slow_pulse;
+    reg [7:0] trigger_counter;
+    
     always @(posedge sys_clk) begin
         a_prev <= a_safe;
         rw_prev <= rw_safe;
         
         if (!sd_reset) begin
-             // READ REQUEST (Trigger on Address or RW change)
-             if (game_loaded && is_rom && rw_safe && ((a_safe != a_prev) || (rw_safe != rw_prev))) begin
+             // READ REQUEST (Trigger on Address or RW change, OR diag peak)
+             if ((game_loaded && is_rom && rw_safe && ((a_safe != a_prev) || (rw_safe != rw_prev))) || diag_read_trigger) begin
                    psram_rd_req <= 1;
+                   if (diag_read_trigger) trigger_counter <= trigger_counter + 1;
              end
              else if (psram_busy) begin 
                    // Acknowledged by 81MHz domain
@@ -424,11 +510,11 @@ module top (
              psram_wr_req <= 0;
              write_buffer <= 0;
              write_pending <= 0;
-             busy <= 0;
-             armed <= 0;
+              busy <= 1; // Start busy for initial load
+              armed <= 0;
              
              current_sector <= 0;
-             psram_load_addr <= 0;
+              psram_load_addr <= 0; // V51e: Start at 0
              sd_byte_available_d <= 0;
              pattern_buf <= 0;
              checksum <= 0;
@@ -436,18 +522,21 @@ module top (
         end else begin
              sd_byte_available_d <= sd_byte_available;
 
-              // --- INDEPENDENT PSRAM WRITE HANDSHAKE ---
-              if (write_pending && !psram_busy) begin
-                   psram_wr_req <= 1;
-                   psram_load_addr <= psram_load_addr + 1;
-                   write_pending <= 0;
-              end else begin
+              // --- INDEPENDENT PSRAM WRITE HANDSHAKE (V51c: Sequential) ---
+              if (psram_wr_req) begin
                    psram_wr_req <= 0;
+                   psram_load_addr <= psram_load_addr + 1; // Increment ONLY after pulsed
+              end else if (write_pending && !psram_busy) begin
+                   psram_wr_req <= 1;
+                   write_pending <= 0;
               end
              
              case (sd_state)
                  SD_IDLE: begin
-                     if (sd_ready && sd_status == 6) sd_state <= SD_START;
+                     if (sd_ready && sd_status == 6) begin
+                         sd_state <= SD_START;
+                         busy <= 1;
+                     end
                  end
                  
                  SD_START: begin
@@ -500,6 +589,7 @@ module top (
                           sd_state <= SD_START;
                       end else begin
                           sd_state <= SD_COMPLETE;
+                          busy <= 0;
                       end
                   end
                  
@@ -515,7 +605,7 @@ module top (
                              // RELOAD Trigger (for testing)
                              sd_state <= SD_START;
                              current_sector <= 0;
-                             psram_load_addr <= 0;
+                             psram_load_addr <= 16'h4000;
                              checksum <= 0;
                              busy <= 1;
                          end
@@ -558,7 +648,7 @@ module top (
     reg [22:0] timer_oe;    reg state_oe;
     reg [22:0] timer_2200;  reg state_2200;  // $2200 detector
     
-    reg [23:0] heartbeat;
+    reg [24:0] heartbeat;
 
     localparam BLINK_DUR = 23'h200000; // ~75ms
 
@@ -638,11 +728,11 @@ module top (
 
     // LED Assignments (Full Loader Mode)
     // Active LOW LEDs. 
-    assign led[0] = ~(sd_state != SD_COMPLETE); // ON if Loading. OFF if Complete.
-    assign led[1] = ~pll_lock;                  // ON if PLL Locked
-    assign led[2] = ~current_sector[4];         // Sector Progress Bit 4
-    assign led[3] = ~current_sector[5];         // Sector Progress Bit 5
-    assign led[4] = ~current_sector[6];         // Sector Progress Bit 6
-    assign led[5] = ~game_loaded;               // ON if Game Mode
+    assign led[0] = !pll_lock;      // ON when Locked
+    assign led[1] = game_loaded;    // ON when Game Mode
+    assign led[2] = !phi2_safe;     // ON when PHI2 activity
+    assign led[3] = !sd_ready;      // ON when SD Ready
+    assign led[4] = write_pending;  // ON when Write active
+    assign led[5] = !busy;          // ON when busy
     
 endmodule

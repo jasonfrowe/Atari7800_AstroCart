@@ -55,6 +55,9 @@ add_file -type cst "$PROJECT_DIR/atari.cst"
 set_option -top_module top
 set_option -verilog_std sysv2017
 set_option -use_sspi_as_gpio 1
+set_option -use_mspi_as_gpio 1
+set_option -use_ready_as_gpio 1
+set_option -use_done_as_gpio 1
 set_option -output_base_name Atari7800_AstroCart
 run all
 EOF

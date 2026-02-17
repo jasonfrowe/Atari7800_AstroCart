@@ -50,6 +50,7 @@ main_loop
  ;
  restorescreen
  gosub draw_cursor
+ gosub draw_hud
  
  ;
  ; Countdown input delay
@@ -81,10 +82,17 @@ draw_game_list
  plotchars 'GALAGA'           0 10 8
  plotchars 'MS PAC-MAN'       0 10 10
  plotchars 'DEFENDER'         0 10 12
+ return
+
+draw_hud
  plotchars $7F00 1 10 13 13
- plotchars $7F10 1 90 13 11
- plotchars $7F20 1 10 14 13
- plotchars $7F30 1 90 14 13
+ plotchars $7F10 1 10 14 11
+ plotchars $7F20 1 10 15 13
+ plotchars $7F30 1 10 16 13
+ plotchars $4440 1 10 17 5
+ plotchars $4450 1 40 17 5
+ plotchars $4460 1 70 17 5
+ plotchars $4470 1 100 17 5
  return
 
 
@@ -100,6 +108,7 @@ draw_cursor
  plotchars ' ' 0 0 14
  plotchars ' ' 0 0 15
  plotchars ' ' 0 0 16
+ plotchars ' ' 0 0 17
  
  ;
  ; Calculate and draw cursor at current selection
