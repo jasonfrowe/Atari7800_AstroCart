@@ -162,32 +162,36 @@ module top (
     wire sd_byte_available;
     wire [4:0] sd_status;
     wire [7:0] sd_recv_data;
+    
     reg sd_rd;
     reg [31:0] sd_address;
-    wire sd_sclk_internal;  // Internal SD controller clock
-    
+    wire sd_sclk_internal;
+
+    // SD Controller
     sd_controller sd_ctrl (
         .cs(sd_cs),
         .mosi(sd_mosi),
         .miso(sd_miso),
-        .sclk(sd_sclk_internal),  // Capture internal clock
+        .sclk(sd_sclk_internal),
         .rd(sd_rd),
         .dout(sd_dout),
         .byte_available(sd_byte_available),
-        .wr(1'b0),                    // No writes for now
+        .wr(1'b0),
         .din(8'h00),
-        .ready_for_next_byte(),       // Unused
+        .ready_for_next_byte(),
         .reset(sd_reset),
         .ready(sd_ready),
-        .address(sd_address),          // SDHC: sector number directly
+        .address(sd_address),
         .clk(sys_clk),
-        // .clk_pulse_slow(clk_pulse_slow), // REMOVED
         .status(sd_status),
         .recv_data(sd_recv_data)
     );
-    
-    // Use SD controller's actual clock
+
     assign sd_clk = sd_sclk_internal;
+
+    // PSRAM Interface Stubs (Until PSRAM ports are added to top)
+    // reg  psram_ready = 1; // Fake ready
+    wire psram_ready = 0; // Not ready
     
     // File detection storage
     reg [5:0] files_found;          // Bitmask for GAME0-GAME5
@@ -195,15 +199,9 @@ module top (
     reg sd_init_done;
     
     // State machine to scan for game files
-    localparam SD_WAIT_INIT = 0;
-    localparam SD_START_READ = 1;
-    localparam SD_READ_SECTOR = 2;
-    localparam SD_SCAN_DATA = 3;
-    localparam SD_NEXT_SECTOR = 4;
-    localparam SD_DONE = 5;
-    localparam SD_PLAYBACK_PATTERN = 6;
+    // (Localparams defined below)
     
-    reg [2:0] sd_state;
+    reg [3:0] sd_state;
     reg [31:0] sector_num;          // 32-bit sector number
     reg [9:0] byte_index;
     reg [87:0] pattern_buf;         // 11-byte sliding window for "GAMEx   A78"
@@ -218,6 +216,32 @@ module top (
     reg [7:0] led_debug_byte;
     reg led_0_toggle;
     
+    // Cluster Parsing
+    reg [5:0] post_match_cnt;
+    reg [31:0] file_cluster;
+    reg [31:0] debug_data_trap;
+
+    // Game Loader Registers
+    reg [8:0] loading_sector_cnt;
+    reg [22:0] psram_load_addr;
+    reg header_found;
+    reg game_loaded;
+        
+    // State Machine Definitions (Localparams)
+    localparam SD_WAIT_INIT       = 0;
+    localparam SD_START_READ      = 1;
+    localparam SD_READ_SECTOR     = 2;
+    localparam SD_SCAN_DATA       = 3;
+    localparam SD_NEXT_SECTOR     = 4;
+    localparam SD_DONE            = 5;
+    localparam SD_PLAYBACK_PATTERN = 6;
+    localparam SD_CALC_LOC        = 7;
+    localparam SD_LOAD_SEEK       = 8;
+    localparam SD_LOAD_READ_WAIT  = 9;
+    localparam SD_LOAD_DATA       = 10;
+    localparam SD_LOAD_NEXT       = 11;
+    localparam SD_GAME_START      = 12;
+
     always @(posedge sys_clk) begin
         if (sd_reset) begin
             sd_byte_available_d <= 0;
@@ -239,6 +263,9 @@ module top (
             playback_index <= 0;
             led_debug_byte <= 0;
             led_0_toggle <= 0;
+            
+            // Loader Init
+            game_loaded <= 0;
         end else begin
             sd_byte_available_d <= sd_byte_available; // Update delayed signal
             
@@ -322,15 +349,15 @@ module top (
                             // CAPTURING subsequent chars (A, M, E...)
                             capture_count <= capture_count + 1;
                             if (capture_count >= 10) begin
-                                // Captured enough! Start Playback
-                                sd_state <= SD_PLAYBACK_PATTERN;
-                                playback_timer <= 0;
-                                playback_index <= 0;
+                                // Captured enough! 
+                                // Do NOT go to Playback Trap. Continue to next sector/done.
+                                // sd_state <= SD_PLAYBACK_PATTERN; // REMOVED
+                                capture_active <= 0; // Stop capturing pattern
                             end
                         end
 
                         // Check for "GAMEx   A78" pattern after receiving 11 bytes
-                        if (byte_index >= 10) begin
+                        if (byte_index >= 10 && !post_match_cnt) begin // Only check if not already found
                             if (pattern_buf[87:80] == 8'h47 &&  // 'G'
                                 pattern_buf[79:72] == 8'h41 &&  // 'A'
                                 pattern_buf[71:64] == 8'h4D &&  // 'M'
@@ -346,6 +373,40 @@ module top (
                                 files_found[pattern_buf[55:48] - 8'h30] <= 1;
                                 if (!files_found[pattern_buf[55:48] - 8'h30])
                                     file_count <= file_count + 1;
+                                
+                                // Start Cluster Parsing
+                                post_match_cnt <= 1; 
+                                file_cluster <= 0;
+                            end
+                        end
+                        
+                        // Parse Cluster Number (FAT32)
+                        // "GAME..." match ends at Offset 10 relative to Entry Start.
+                        // post_match_cnt counts bytes AFTER match.
+                        // Entry Structure:
+                        // 00-10: Name (Matched)
+                        // 20-21: FstClusHI (High Word) -> Match+10, Match+11
+                        // 26-27: FstClusLO (Low Word)  -> Match+16, Match+17
+                        if (post_match_cnt > 0) begin
+                            post_match_cnt <= post_match_cnt + 1;
+                            // Correct Offsets:
+                            // We start `post_match_cnt` at Offset 11 (Attr).
+                            // High Word is Offset 20, 21. Delta = 9, 10. (Wait. 20-11=9).
+                            // Low Word is Offset 26, 27. Delta = 15, 16.
+                            // My previous map was 10, 11 (High) and 16, 17 (Low).
+                            // Let's stick to the ones that worked!
+                            // Offset 20 is `post_match_cnt == 10`.
+                            // Offset 21 is `post_match_cnt == 11`.
+                            // Offset 26 is `post_match_cnt == 16`.
+                            // Offset 27 is `post_match_cnt == 17`.
+                            
+                            if (post_match_cnt == 10) file_cluster[23:16] <= sd_dout;
+                            if (post_match_cnt == 11) file_cluster[31:24] <= sd_dout;
+                            if (post_match_cnt == 16) file_cluster[7:0]   <= sd_dout;
+                            if (post_match_cnt == 17) file_cluster[15:8]  <= sd_dout;
+                            
+                            if (post_match_cnt >= 32) begin // Done with entry
+                                post_match_cnt <= 0; // Reset for next entry
                             end
                         end
                     end
@@ -382,36 +443,147 @@ module top (
                 end
 
                 SD_NEXT_SECTOR: begin
-                    // Scan 2000 sectors
-                    if (file_count >= 6 || sector_count >= 2000) begin
-                        sd_state <= SD_DONE;
-                        sd_init_done <= 1;
-                        // Setup fallback display
-                        playback_index <= 0;
+                    // Scan LIMIT (reduced for targeted scan)
+                    if (file_count >= 1 || sector_count >= 2000) begin
+                        if (file_count > 0) begin
+                            // File Found! Proceed to Load.
+                            sd_state <= SD_CALC_LOC;
+                        end else begin
+                            // Not found
+                            sd_state <= SD_DONE;
+                            sd_init_done <= 1; // Done (Failed)
+                            led_0_toggle <= 0;
+                        end
                     end else begin
                         sector_num <= sector_num + 1;
                         sd_state <= SD_START_READ;
                     end
                 end
+
+                SD_CALC_LOC: begin
+                    // HEADER SEARCH MODE
+                    // Instead of calculating, we START at Root (32274) and SCAN for "ATARI7800".
+                    sector_num <= 32274; 
+                    
+                    sd_state <= SD_LOAD_SEEK;
+                    loading_sector_cnt <= 0;
+                    psram_load_addr <= 0;
+                    led_0_toggle <= 1;    
+                    
+                    // Reset Logic for Header Check
+                    pattern_buf <= 0;
+                    header_found <= 0;
+                end
+
+                SD_LOAD_SEEK: begin
+                    // Start reading the sector
+                    sd_address <= sector_num;
+                    sd_rd <= 1;
+                    byte_index <= 0;
+                    pattern_buf <= 0;
+                    sd_state <= SD_LOAD_READ_WAIT;
+                end
+
+                SD_LOAD_READ_WAIT: begin
+                    if (!sd_ready) begin
+                        sd_rd <= 0;
+                        sd_state <= SD_LOAD_DATA;
+                    end
+                end
+
+                SD_LOAD_DATA: begin
+                    if (sd_ready && byte_index < 512) begin
+                        sd_state <= SD_LOAD_NEXT; 
+                    end
+                    else if (sd_byte_available && !sd_byte_available_d) begin
+                         // Shift into pattern buffer for Header verification
+                        pattern_buf <= {pattern_buf[79:0], sd_dout};
+                        byte_index <= byte_index + 1;
+                        
+                        // Check for "ATARI7800" at start of file (Bytes 0-8)
+                        if (byte_index >= 9) begin
+                             if (pattern_buf[71:64] == 8'h41 && // A
+                                 pattern_buf[63:56] == 8'h54 && // T
+                                 pattern_buf[55:48] == 8'h41 && // A
+                                 pattern_buf[47:40] == 8'h52 && // R
+                                 pattern_buf[39:32] == 8'h49 && // I
+                                 pattern_buf[31:24] == 8'h37 && // 7
+                                 pattern_buf[23:16] == 8'h38 && // 8
+                                 pattern_buf[15:8]  == 8'h30 && // 0
+                                 pattern_buf[7:0]   == 8'h30)   // 0
+                             begin
+                                 header_found <= 1;
+                                 sd_state <= SD_GAME_START; // Found it! Stop immediately.
+                             end
+                        end
+                    end
+                    
+                    if (sd_ready) begin
+                       sd_state <= SD_LOAD_NEXT;
+                    end
+                end
+
+                SD_LOAD_NEXT: begin
+                     // If we are here, we finished a sector.
+                     // Did we find the header?
+                     if (header_found) begin
+                        // This logic is actually skipped because SD_LOAD_DATA jumps to GAME_START on success.
+                        // But if we wanted to continue loading...
+                        // For now, we only want to FIND it.
+                        sd_state <= SD_GAME_START;
+                     end else begin
+                        // Header NOT found in this sector.
+                        // Increment Sector and Search Next.
+                        sector_num <= sector_num + 1;
+                        // Reset everything for next sector
+                        byte_index <= 0;
+                        pattern_buf <= 0;
+                        loading_sector_cnt <= 0; // Not loading yet
+                        
+                        // Search Limit (e.g. 5000 sectors -> ~2.5MB)
+                        if (sector_num > (32274 + 5000)) begin
+                            sd_state <= SD_DONE; // Give up
+                        end else begin
+                            sd_state <= SD_LOAD_SEEK;
+                        end
+                     end
+                end
+
+                SD_GAME_START: begin
+                     game_loaded <= 1; // Success!
+                     led_debug_byte <= 8'hAA; 
+                     sd_init_done <= 1;
+                     led_0_toggle <= 1;
+                     sd_state <= SD_DONE; 
+                end
                 
                 SD_DONE: begin
-                    // If no files found, cycle the captured Scope Bytes (Sector 0)
-                    if (file_count == 0) begin
-                        if (sector_num[25] == 0) sector_num <= sector_num + 1; // Use as timer
-                        else begin
-                            sector_num <= 0; 
-                            playback_index <= playback_index + 1;
-                            if (playback_index >= 4) playback_index <= 0;
-                            
-                            case (playback_index)
-                                // displaying captured playback_timer bytes
-                                0: led_debug_byte <= playback_timer[7:0];
-                                1: led_debug_byte <= playback_timer[15:8];
-                                2: led_debug_byte <= playback_timer[23:16];
-                                3: led_debug_byte <= {6'b0, playback_timer[25:24]}; 
-                            endcase
-                        end
-                        led_0_toggle <= 1; // Turn on LED 0 to indicate "Done/Scope Mode"
+                    // Done State
+                    if (game_loaded) begin
+                         // SUCCESS:
+                         // Display Low Byte of Sector Number where file was found.
+                         // This helps us know WHERE it is.
+                         led_debug_byte <= sector_num[7:0]; 
+                         led_0_toggle <= 1;
+                    end else if (file_count > 0) begin
+                        // File found in Dir, but Header text NOT found in data scan.
+                         if (sector_num[26] == 0) begin
+                             sector_num <= sector_num + 1; 
+                         end else begin
+                              sector_num <= 0;
+                              playback_index <= playback_index + 1;
+                              if (playback_index >= 4) playback_index <= 0;
+                              case (playback_index)
+                                  0: led_debug_byte <= debug_data_trap[7:0]; // Last Trap
+                                  1: led_debug_byte <= debug_data_trap[15:8];
+                                  2: led_debug_byte <= debug_data_trap[23:16];
+                                  3: led_debug_byte <= debug_data_trap[31:24]; 
+                              endcase
+                         end
+                         led_0_toggle <= 1; 
+                    end else begin
+                         // Fail
+                         led_0_toggle <= 0; 
                     end
                     sd_init_done <= 1;
                 end
@@ -554,6 +726,6 @@ module top (
     assign led[2] = ~led_debug_byte[1];         // Data Bit 1
     assign led[3] = ~led_debug_byte[2];         // Data Bit 2
     assign led[4] = ~led_debug_byte[3];         // Data Bit 3
-    assign led[5] = ~heartbeat[23];             // HEARTBEAT
+    assign led[5] = ~game_loaded;               // ON if Header Verified (Game Loaded)
     
 endmodule
