@@ -303,25 +303,68 @@ module top (
     reg loading_phase;
     reg game_loaded;
         
-    // Stub State Machine (Menu Verification)
-    // Forces game_loaded to 0 to verify Menu ROM functionality.
-    
-    localparam SD_IDLE = 0;
+    // Simple Single-Sector Loader (Step 1)
+    localparam SD_IDLE       = 0;
+    localparam SD_START      = 1;
+    localparam SD_WAIT       = 2;
+    localparam SD_DATA       = 3;
+    localparam SD_DONE       = 4;
     
     always @(posedge sys_clk) begin
-        // Force Menu ROM constantly
-        game_loaded <= 0;
-        
-        // Idle SD interface
-        sd_state <= SD_IDLE;
-        sd_rd <= 0;
-        sd_address <= 0;
-        psram_wr_req <= 0;
-        
-        // Reset legacy regs
-        sd_byte_available_d <= 0;
-        byte_index <= 0;
-        pattern_buf <= 0;
+        if (sd_reset) begin
+             sd_state <= SD_IDLE;
+             sd_rd <= 0;
+             sd_address <= 0;
+             byte_index <= 0;
+             led_debug_byte <= 0;
+             led_0_toggle <= 0;
+             game_loaded <= 0;
+             psram_wr_req <= 0;
+             sd_byte_available_d <= 0;
+             pattern_buf <= 0;
+        end else begin
+             sd_byte_available_d <= sd_byte_available;
+             
+             case (sd_state)
+                 SD_IDLE: begin
+                     if (sd_ready && sd_status == 6) sd_state <= SD_START;
+                 end
+                 
+                 SD_START: begin
+                     sd_address <= 0; // Sector 0
+                     sd_rd <= 1;
+                     byte_index <= 0;
+                     sd_state <= SD_WAIT;
+                 end
+                 
+                 SD_WAIT: begin
+                     if (!sd_ready) begin
+                         sd_rd <= 0;
+                         sd_state <= SD_DATA;
+                     end
+                 end
+                 
+                 SD_DATA: begin
+                     if (sd_ready && byte_index < 512) begin
+                         // Abort
+                         sd_state <= SD_DONE;
+                         led_debug_byte <= 8'hFF; // Error
+                     end else if (sd_byte_available && !sd_byte_available_d) begin
+                         if (byte_index == 0) begin
+                              led_debug_byte <= sd_dout; // Capture first byte
+                              led_0_toggle <= 1; // Signal Logic 1
+                         end
+                         byte_index <= byte_index + 1;
+                         if (byte_index == 511) sd_state <= SD_DONE;
+                     end
+                 end
+                 
+                 SD_DONE: begin
+                     // Stay here. LED 0 Toggle ON.
+                     led_0_toggle <= 1;
+                 end
+             endcase
+        end
     end
         
 
@@ -435,13 +478,13 @@ module top (
         end
     end
 
-    // LED Assignments (Menu Verification Mode)
+    // LED Assignments (Single Sector Debug Mode)
     // Active LOW LEDs. 
-    assign led[0] = 1'b1;                       // OFF
+    assign led[0] = ~led_0_toggle;              // ON when Data Byte 0 Received
     assign led[1] = ~pll_lock;                  // ON if PLL Locked
-    assign led[2] = 1'b1;                       // OFF
-    assign led[3] = 1'b1;                       // OFF
-    assign led[4] = 1'b1;                       // OFF
+    assign led[2] = ~sd_state[0];               // State Bit 0
+    assign led[3] = ~sd_state[1];               // State Bit 1
+    assign led[4] = ~sd_state[2];               // State Bit 2
     assign led[5] = ~game_loaded;               // ON if Game Mode (Should be OFF)
     
 endmodule
