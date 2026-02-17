@@ -1,22 +1,22 @@
 module gowin_pll (
     input  clkin,
-    output clkout,  // 81MHz Logic Clock
-    output clkoutp, // 81MHz Phase-Shifted (for RAM)
+    output clkout,  // 81MHz for PSRAM IP
+    output clkoutp, // Not used with Gowin IP
     output lock
 );
 
     rPLL #(
         .FCLKIN("27"),
         .DEVICE("GW1NR-9C"),
-        .IDIV_SEL(0),      // From zf3 reference
-        .FBDIV_SEL(2),     // From zf3 reference  
-        .ODIV_SEL(8),      // From zf3 reference -> 81MHz
+        .IDIV_SEL(0),       // Input divider: 27/(0+1) = 27MHz
+        .FBDIV_SEL(2),      // Feedback: 27*3 = 81MHz (VCO=648MHz with ODIV)
+        .ODIV_SEL(8),       // Output divider: gives 81MHz
         .DYN_SDIV_SEL(2),
         .CLKFB_SEL("internal"),
         .CLKOUT_BYPASS("false"),
-        .CLKOUTP_BYPASS("false"), // Enable P-Clock for HyperRAM
+        .CLKOUTP_BYPASS("true"),  // Not using phase-shifted clock
         .CLKOUTD_BYPASS("true"),
-        .DYN_DA_EN("false"),     // Disable Dynamic
+        .DYN_DA_EN("false"),
         .DUTYDA_SEL("1000"),
         .PSDA_SEL("0000"),
         .CLKOUT_FT_DIR(1'b1),

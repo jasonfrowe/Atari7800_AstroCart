@@ -31,8 +31,6 @@ module psram_controller (
     // ========================================================================
     // 1. DDR CLOCK GENERATION
     // ========================================================================
-    // Use ODDR primitives to generate differential clock from phase-shifted clock
-    // Use ODDR primitives to generate differential clock from phase-shifted clock
     ODDR ck_oddr_0 (
         .Q0(O_psram_ck[0]),
         .D0(1'b0),
@@ -40,15 +38,7 @@ module psram_controller (
         .TX(1'b0),
         .CLK(clk_shifted)
     );
-    /*
-    ODDR ck_n_oddr_0 (
-        .Q0(O_psram_ck_n[0]),
-        .D0(1'b1),
-        .D1(1'b0),
-        .TX(1'b0),
-        .CLK(clk_shifted)
-    );
-    */
+    
     ODDR ck_oddr_1 (
         .Q0(O_psram_ck[1]),
         .D0(1'b0),
@@ -56,15 +46,6 @@ module psram_controller (
         .TX(1'b0),
         .CLK(clk_shifted)
     );
-    /*
-    ODDR ck_n_oddr_1 (
-        .Q0(O_psram_ck_n[1]),
-        .D0(1'b1),
-        .D1(1'b0),
-        .TX(1'b0),
-        .CLK(clk_shifted)
-    );
-    */
 
     // ========================================================================
     // 2. STATE MACHINE
@@ -81,43 +62,30 @@ module psram_controller (
     localparam CA_BYTE5    = 4'd9;
     localparam LATENCY     = 4'd10;
     localparam DATA_PHASE  = 4'd11;
-    localparam DONE        = 4'd12;
+    localparam WRITE_HOLD  = 4'd12;
+    localparam DONE        = 4'd13;
     
     reg [3:0] state;
     reg [3:0] next_state;
     reg [3:0] latency_count;
+    reg [3:0] data_count;
     reg [14:0] init_count;  // 15-bit counter for 150us delay (12,150 cycles at 81MHz)
     
     // 150us initialization delay at 81MHz = 12,150 cycles
     localparam INIT_CYCLES = 15'd12150;
     
     // Command/Address packet (48 bits for HyperRAM)
-    // [47]    = R/W# (1=Read, 0=Write)
-    // [46]    = Address Space (0=Memory, 1=Register) 
-    // [45]    = Burst Type (1=Linear, 0=Wrapped)
-    // [44:16] = Reserved/Row Address
-    // [15:3]  = Column Address  
-    // [2:0]   = Reserved
     reg [47:0] ca_packet;
-    reg [7:0] ca_byte;
     reg [7:0] data_buffer;
     
-    // Tristate control
-    reg dq_oe;           // Output enable for data bus
-    reg rwds_oe;         // Output enable for RWDS
-    reg [7:0] dq_out;    // Output data
-    
-    // Drive BOTH channels identically for simplicity (Channel 0 and Channel 1)
-    // We only actively use the lower 8 bits (Channel 0) based on address decoding inside the chip?
-    // Actually, Tang Nano 9K connects two dies separately. 
-    // For simplicity, let's drive everything to Channel 0 behavior and let Channel 1 mirror or idle.
-    
-    // We only use 8-bit data bus (Single Chip Mode)
+    // Simple tristate I/O
+    reg dq_oe;
+    reg [7:0] dq_out;
+    reg rwds_oe;
     
     assign IO_psram_dq = dq_oe ? dq_out : 8'hzz;
-    
     assign IO_psram_rwds[0] = rwds_oe ? 1'b0 : 1'bz;
-    assign IO_psram_rwds[1] = 1'bz;   // Channel 1 Unused
+    assign IO_psram_rwds[1] = 1'bz;
     
     // ========================================================================
     // 3. MAIN CONTROLLER FSM
@@ -128,10 +96,12 @@ module psram_controller (
             O_psram_cs_n <= 2'b11;   // Deassert both CS#
             O_psram_reset_n <= 2'b00; // Reset both
             dq_oe <= 1'b0;
+            dq_out <= 8'h00;
             rwds_oe <= 1'b0;
             busy <= 1'b0;
             data_ready <= 1'b0;
             latency_count <= 4'd0;
+            data_count <= 4'd0;
             init_count <= 15'd0;
             read_data <= 8'h00;
         end else begin
@@ -149,9 +119,10 @@ module psram_controller (
                     if (init_count < INIT_CYCLES) begin
                         init_count <= init_count + 1'b1;
                     end else begin
-                        // Release Reset, move to CONFIG state
+                        // Release Reset, go directly to IDLE (skip CONFIG for now)
                         O_psram_reset_n <= 2'b11;
-                        state <= CONFIG;
+                        state <= IDLE;
+                        busy <= 1'b0;
                     end
                 end
                 
@@ -185,27 +156,26 @@ module psram_controller (
                 // IDLE: Wait for command
                 // --------------------------------------------------------
                 IDLE: begin
-                    data_ready <= 1'b0;
-                    O_psram_cs_n <= 1'b1;
+                    O_psram_cs_n <= 2'b11;  // Deassert both CS#
                     dq_oe <= 1'b0;
                     rwds_oe <= 1'b0;
                     
                     if (cmd_valid) begin
+                        data_ready <= 1'b0;  // Clear on new command
                         busy <= 1'b1;
-                        O_psram_cs_n <= 1'b0;  // Assert CS#
+                        O_psram_cs_n <= 2'b10;  // Assert CS#[0], deassert CS#[1]
                         
                         // Capture write data
                         data_buffer <= write_data;
                         
                         // Build Command/Address packet
-                        // Format: [R/W#][AS][BT][Addr][Reserved]
+                        // Format: [R/W#][AS][BT][Row Address][Column Address][Reserved]
+                        // For 22-bit byte address: split into row (upper 9 bits) and column (lower 13 bits)
                         ca_packet[47] <= ~cmd_write;     // Read=1, Write=0
                         ca_packet[46] <= 1'b0;           // Memory space
                         ca_packet[45] <= 1'b1;           // Linear burst
-                        ca_packet[44:32] <= 13'd0;       // Upper address bits
-                        ca_packet[31:19] <= cmd_addr[21:9];  // Row address
-                        ca_packet[18:16] <= cmd_addr[8:6];   // Column high
-                        ca_packet[15:3] <= {cmd_addr[5:0], 7'd0};  // Column
+                        ca_packet[44:16] <= {20'd0, cmd_addr[21:13]};  // Row: upper 9 bits
+                        ca_packet[15:3] <= cmd_addr[12:0];              // Column: lower 13 bits  
                         ca_packet[2:0] <= 3'd0;          // Reserved
                         
                         state <= CA_START;
@@ -219,7 +189,6 @@ module psram_controller (
                 // --------------------------------------------------------
                 CA_START: begin
                     dq_oe <= 1'b1;
-                    ca_byte <= ca_packet[47:40];
                     dq_out <= ca_packet[47:40];
                     state <= CA_BYTE1;
                 end
@@ -254,45 +223,66 @@ module psram_controller (
                 end
                 
                 // --------------------------------------------------------
-                // LATENCY: Fixed latency period (typ. 6 cycles)
+                // LATENCY: Fixed latency period (try 7 cycles)
                 // --------------------------------------------------------
                 LATENCY: begin
                     dq_oe <= 1'b0;  // Release bus
                     rwds_oe <= 1'b0;
                     
-                    if (latency_count < 4'd6) begin
+                    if (latency_count < 4'd7) begin
                         latency_count <= latency_count + 1'b1;
                     end else begin
+                        data_count <= 4'd0;
                         state <= DATA_PHASE;
                     end
                 end
                 
                 // --------------------------------------------------------
-                // DATA_PHASE: Read or Write data
+                // DATA_PHASE: Read or Write data (hold for 2 cycles)
                 // --------------------------------------------------------
                 DATA_PHASE: begin
                     if (ca_packet[47]) begin
-                        // READ operation
+                        // READ operation - capture immediately
                         dq_oe <= 1'b0;
-                        read_data <= IO_psram_dq;  // Capture data
+                        read_data <= IO_psram_dq;
                         data_ready <= 1'b1;
+                        state <= DONE;
                     end else begin
-                        // WRITE operation
+                        // WRITE operation - drive data
                         dq_oe <= 1'b1;
-                        dq_out <= data_buffer;  // Use captured write data
+                        dq_out <= data_buffer;
                         rwds_oe <= 1'b1;  // Drive RWDS low for write
+                        data_count <= 4'd0;
+                        state <= WRITE_HOLD;
                     end
-                    state <= DONE;
                 end
                 
                 // --------------------------------------------------------
-                // DONE: Complete transaction
+                // WRITE_HOLD: Keep write data stable with CS# asserted
+                // --------------------------------------------------------
+                WRITE_HOLD: begin
+                    // Hold everything stable
+                    dq_oe <= 1'b1;
+                    dq_out <= data_buffer;
+                    rwds_oe <= 1'b1;
+                    O_psram_cs_n <= 2'b10;  // Explicitly keep CS# asserted
+                    
+                    if (data_count == 4'd8) begin
+                        state <= DONE;
+                    end else begin
+                        data_count <= data_count + 1'b1;
+                    end
+                end
+                
+                // --------------------------------------------------------
+                // DONE: Complete transaction - data_ready persists until next command
                 // --------------------------------------------------------
                 DONE: begin
                     O_psram_cs_n <= 2'b11;  // Deassert CS# for both
                     dq_oe <= 1'b0;
                     rwds_oe <= 1'b0;
                     busy <= 1'b0;
+                    data_count <= 4'd0;
                     state <= IDLE;
                 end
                 

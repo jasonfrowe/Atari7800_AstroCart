@@ -19,19 +19,20 @@ module top (
     input        sd_miso,   // SPI MISO (Master In, Slave Out)
     output       sd_clk,    // SPI Clock
     
-    // PSRAM (Tang Nano 9K - Magic Ports - auto-routed by Gowin)
-    output wire [1:0] O_psram_ck,      // 2-bit Clock (ck_n auto-inferred)
-    output wire [1:0] O_psram_cs_n,    // 2-bit CS#
-    output wire [1:0] O_psram_reset_n, // 2-bit Reset#
+    // PSRAM (Tang Nano 9K - Gowin IP Core)
+    output wire [0:0] O_psram_ck,      // Clock
+    output wire [0:0] O_psram_ck_n,    // Clock inverted
+    output wire [0:0] O_psram_cs_n,    // CS#
+    output wire [0:0] O_psram_reset_n, // Reset#
     inout [7:0]       IO_psram_dq,     // 8-bit Data
-    inout [1:0]       IO_psram_rwds,    // 2-bit RWDS
+    inout [0:0]       IO_psram_rwds,   // RWDS
     
     output       audio,     // Audio PWM
     output [5:0] led       // Debug LEDs
 );
 
     // ========================================================================
-    // 0. CLOCK GENERATION (No PLL - 27MHz native, Atari crashes with 81MHz)
+    // 0. CLOCK GENERATION (27MHz native for Atari, 60MHz PLL for PSRAM)
     // ========================================================================
     wire sys_clk = clk;     // 27MHz native
 
@@ -279,11 +280,9 @@ module top (
     wire sd_reset = !pll_lock;
 
     // ========================================================================
-    // 7. PSRAM CONTROLLER (HyperRAM)
+    // 7. PSRAM CONTROLLER (Gowin IP)
     // ========================================================================
     
-    wire clk_81m;
-    wire clk_81m_shifted;
     wire pll_lock;
     
     gowin_pll pll_inst (
@@ -340,21 +339,109 @@ module top (
                                 (psram_load_addr[21:0] == 3) ? 8'h3C : 
                                 write_buffer;
     
-    psram_controller psram_ctrl (
-        .clk(clk_81m),
-        .clk_shifted(clk_81m_shifted),
-        .reset_n(pll_lock),
+    // Gowin PSRAM IP signals (32-bit interface)
+    reg         ip_cmd_en;
+    wire [20:0] ip_addr;
+    wire [31:0] ip_wr_data;
+    wire [31:0] ip_rd_data;
+    wire        ip_rd_data_valid;
+    wire        ip_init_calib;
+    wire        ip_clk_out;
+    
+    // Byte-level conversion logic
+    // Address: divide by 4 for 32-bit words, use addr[1:0] for byte select
+    assign ip_addr = psram_cmd_addr[21:2];
+    
+    // Write: replicate byte across all 4 bytes
+    assign ip_wr_data = {4{psram_din_mux}};
+    
+    // Read: extract byte based on address[1:0]
+    reg [7:0] extracted_byte;
+    always @(*) begin
+        case (psram_cmd_addr[1:0])
+            2'd0: extracted_byte = ip_rd_data[7:0];
+            2'd1: extracted_byte = ip_rd_data[15:8];
+            2'd2: extracted_byte = ip_rd_data[23:16];
+            2'd3: extracted_byte = ip_rd_data[31:24];
+        endcase
+    end
+    
+    // State machine for IP control
+    localparam IP_WAIT_INIT = 2'd0;
+    localparam IP_IDLE = 2'd1;
+    localparam IP_ACTIVE = 2'd2;
+    
+    reg [1:0] ip_state;
+    reg [7:0] ip_data_buffer;
+    reg [3:0] ip_wait_count;  // Counter for write completion
+    
+    assign psram_dout = ip_data_buffer;
+    assign psram_data_ready = (ip_state == IP_IDLE) && ip_init_calib;
+    assign psram_busy = !ip_init_calib || (ip_state != IP_IDLE) || ip_cmd_en;
+    
+    always @(posedge sys_clk or negedge pll_lock) begin
+        if (!pll_lock) begin
+            ip_state <= IP_WAIT_INIT;
+            ip_cmd_en <= 1'b0;
+            ip_data_buffer <= 8'h00;
+            ip_wait_count <= 4'h0;
+        end else begin
+            case (ip_state)
+                IP_WAIT_INIT: begin
+                    if (ip_init_calib) begin
+                        ip_state <= IP_IDLE;
+                    end
+                end
+                
+                IP_IDLE: begin
+                    if (psram_cmd_valid && ip_init_calib) begin
+                        ip_cmd_en <= 1'b1;
+                        ip_wait_count <= 4'h0;
+                        ip_state <= IP_ACTIVE;
+                    end else begin
+                        ip_cmd_en <= 1'b0;
+                    end
+                end
+                
+                IP_ACTIVE: begin
+                    ip_cmd_en <= 1'b0;
+                    ip_wait_count <= ip_wait_count + 1'b1;
+                    
+                    if (ip_rd_data_valid) begin
+                        // Read completed
+                        ip_data_buffer <= extracted_byte;
+                        ip_state <= IP_IDLE;
+                    end else if (psram_cmd_write && ip_wait_count >= 4'd8) begin
+                        // Write completed after minimum 8 cycles
+                        ip_state <= IP_IDLE;
+                    end
+                end
+                
+                default: ip_state <= IP_WAIT_INIT;
+            endcase
+        end
+    end
+    
+    // Instantiate Gowin PSRAM IP (at top level for auto-routing)
+    PSRAM_Memory_Interface_HS_Top psram_ip (
+        .clk(sys_clk),              // 27MHz system clock
+        .memory_clk(clk_81m),       // 81MHz PSRAM clock
+        .pll_lock(pll_lock),        // PLL lock signal
+        .rst_n(pll_lock),           // Active-high reset
         
-        .cmd_valid(psram_cmd_valid),
-        .cmd_write(psram_cmd_write),
-        .cmd_addr(psram_cmd_addr), 
-        .write_data(psram_din_mux),
-        .read_data(psram_dout),
-        .data_ready(psram_data_ready),
-        .busy(psram_busy),
+        .cmd(psram_cmd_write),      // 0=read, 1=write
+        .cmd_en(ip_cmd_en),
+        .addr(ip_addr),
+        .wr_data(ip_wr_data),
+        .data_mask(4'b0000),        // Enable all bytes
+        .rd_data(ip_rd_data),
+        .rd_data_valid(ip_rd_data_valid),
+        .init_calib(ip_init_calib),
+        .clk_out(ip_clk_out),
         
-        // Magic Ports
+        // PSRAM Hardware Interface
         .O_psram_ck(O_psram_ck),
+        .O_psram_ck_n(O_psram_ck_n),
         .O_psram_cs_n(O_psram_cs_n),
         .O_psram_reset_n(O_psram_reset_n),
         .IO_psram_dq(IO_psram_dq),
@@ -371,27 +458,52 @@ module top (
     reg [15:0] a_prev;
     reg rw_prev;
     
-    // V51j: Slow Trigger 
-    wire slow_pulse = heartbeat[24]; 
-    reg slow_pulse_prev;
-    always @(posedge sys_clk) slow_pulse_prev <= slow_pulse;
-    // Only fire when heartbeat is high (or transitions high) AND offset 0
-    // V51m: Restore Fast Trigger (Remove slow_pulse gating)
-    wire diag_read_trigger = (is_psram_diag0 || is_psram_diag1 || is_psram_diag2 || is_psram_diag3) && rw_safe && (a_safe != a_prev) && (a_safe[3:0] == 4'h0); // && slow_pulse;
+    // Diagnostic read-once latches (prevent continuous re-reading)
+    reg diag0_read_done;
+    reg diag1_read_done;
+    reg diag2_read_done;
+    reg diag3_read_done;
+    
+    // Detect when we're in any diagnostic region
+    wire in_any_diag = is_psram_diag0 || is_psram_diag1 || is_psram_diag2 || is_psram_diag3;
+    
+    // Only trigger read once per entry to diagnostic region
+    wire diag_read_trigger = !game_loaded && rw_safe && 
+                            ((is_psram_diag0 && !diag0_read_done) ||
+                             (is_psram_diag1 && !diag1_read_done) ||
+                             (is_psram_diag2 && !diag2_read_done) ||
+                             (is_psram_diag3 && !diag3_read_done));
+    
     reg [7:0] trigger_counter;
     
     always @(posedge sys_clk) begin
         a_prev <= a_safe;
         rw_prev <= rw_safe;
         
+        // Reset read-done flags when leaving diagnostic regions
+        if (!in_any_diag) begin
+            diag0_read_done <= 0;
+            diag1_read_done <= 0;
+            diag2_read_done <= 0;
+            diag3_read_done <= 0;
+        end
+        
         if (!sd_reset) begin
              // READ REQUEST (Trigger on Address or RW change, OR diag peak)
              if ((game_loaded && is_rom && rw_safe && ((a_safe != a_prev) || (rw_safe != rw_prev))) || diag_read_trigger) begin
                    psram_rd_req <= 1;
-                   if (diag_read_trigger) trigger_counter <= trigger_counter + 1;
+                   
+                   // Mark diagnostic region as read
+                   if (diag_read_trigger) begin
+                       trigger_counter <= trigger_counter + 1;
+                       if (is_psram_diag0) diag0_read_done <= 1;
+                       if (is_psram_diag1) diag1_read_done <= 1;
+                       if (is_psram_diag2) diag2_read_done <= 1;
+                       if (is_psram_diag3) diag3_read_done <= 1;
+                   end
              end
              else if (psram_busy) begin 
-                   // Acknowledged by 81MHz domain
+                   // Acknowledged by 81MHz PSRAM domain
                    psram_rd_req <= 0; 
              end
              else if (!game_loaded) psram_rd_req <= 0; // Menu Mode safety
