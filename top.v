@@ -133,13 +133,27 @@ module top (
     // SD Card - MIT sd_controller (Tang 9K compatible)
     // Direct rd/wr interface
     
-    // Slow clock for SD controller
-    reg [1:0] clk_div_counter;  // Divide by 4 -> ~6.75MHz SPI
-    reg clk_pulse_slow;
+    // Power-on reset for SD controller - simple counter approach
+    // Counter will eventually overflow and stop, ending reset
+    reg [7:0] reset_counter;
     
     always @(posedge sys_clk) begin
-        clk_div_counter <= clk_div_counter + 1;
-        clk_pulse_slow <= (clk_div_counter == 0);
+        if (reset_counter != 8'hFF) begin
+            reset_counter <= reset_counter + 1;
+        end
+    end
+    
+    // Assert reset only during first ~50 cycles, then deassert forever
+    wire sd_reset = (reset_counter < 8'd50);
+    
+    // Slow clock for SD controller (Internal to SD controller now)
+    
+    // TEST: Direct clock output to verify pin connection
+    reg test_clk = 0;
+    reg [3:0] test_div = 0;
+    always @(posedge sys_clk) begin
+        test_div <= test_div + 1;
+        if (test_div == 0) test_clk <= ~test_clk;  // Much slower test clock (~1.6MHz)
     end
     
     // SD Controller signals
@@ -150,26 +164,30 @@ module top (
     wire [7:0] sd_recv_data;
     reg sd_rd;
     reg [31:0] sd_address;
+    wire sd_sclk_internal;  // Internal SD controller clock
     
     sd_controller sd_ctrl (
         .cs(sd_cs),
         .mosi(sd_mosi),
         .miso(sd_miso),
-        .sclk(sd_clk),
+        .sclk(sd_sclk_internal),  // Capture internal clock
         .rd(sd_rd),
         .dout(sd_dout),
         .byte_available(sd_byte_available),
         .wr(1'b0),                    // No writes for now
         .din(8'h00),
         .ready_for_next_byte(),       // Unused
-        .reset(~pll_lock),
+        .reset(sd_reset),
         .ready(sd_ready),
         .address(sd_address),          // SDHC: sector number directly
         .clk(sys_clk),
-        .clk_pulse_slow(clk_pulse_slow),
+        // .clk_pulse_slow(clk_pulse_slow), // REMOVED
         .status(sd_status),
         .recv_data(sd_recv_data)
     );
+    
+    // Use SD controller's actual clock
+    assign sd_clk = sd_sclk_internal;
     
     // File detection storage
     reg [5:0] files_found;          // Bitmask for GAME0-GAME5
@@ -183,25 +201,44 @@ module top (
     localparam SD_SCAN_DATA = 3;
     localparam SD_NEXT_SECTOR = 4;
     localparam SD_DONE = 5;
+    localparam SD_PLAYBACK_PATTERN = 6;
     
     reg [2:0] sd_state;
     reg [31:0] sector_num;          // 32-bit sector number
-    reg [8:0] byte_index;
+    reg [9:0] byte_index;
     reg [87:0] pattern_buf;         // 11-byte sliding window for "GAMEx   A78"
     reg sd_byte_available_d;        // Delayed signal for edge detection
+    reg [15:0] sector_count;        // Number of sectors scanned
     
-    always @(posedge sys_clk or negedge pll_lock) begin
-        if (!pll_lock) begin
+    // Capture/Playback Registers
+    reg capture_active;
+    reg [4:0] capture_count;
+    reg [25:0] playback_timer;
+    reg [4:0] playback_index;
+    reg [7:0] led_debug_byte;
+    reg led_0_toggle;
+    
+    always @(posedge sys_clk) begin
+        if (sd_reset) begin
             sd_byte_available_d <= 0;
             sd_state <= SD_WAIT_INIT;
             sd_rd <= 0;
-            sector_num <= 2050;     // Files at sector ~2055 per grep
+            sector_num <= 32270;    // Target Sector 32274 (Offset 16524480 / 512)
             byte_index <= 0;
             files_found <= 0;
             file_count <= 0;
             sd_init_done <= 0;
             pattern_buf <= 0;
             sd_address <= 0;
+            sector_count <= 0;
+            
+            // Playback Init
+            capture_active <= 0;
+            capture_count <= 0;
+            playback_timer <= 0;
+            playback_index <= 0;
+            led_debug_byte <= 0;
+            led_0_toggle <= 0;
         end else begin
             sd_byte_available_d <= sd_byte_available; // Update delayed signal
             
@@ -219,57 +256,138 @@ module top (
                     sd_rd <= 1;
                     byte_index <= 0;
                     pattern_buf <= 0;
-                    if (!sd_ready) begin  // Wait for controller to start (sd_ready drops)
+                    sd_state <= SD_READ_SECTOR;
+                end
+                
+                SD_READ_SECTOR: begin
+                    // Wait one cycle for sd_rd to be sampled, then check if read started
+                    if (!sd_ready) begin  // Controller has started reading
                         sd_rd <= 0;
                         sd_state <= SD_SCAN_DATA;
                     end
                 end
                 
-                SD_READ_SECTOR: begin
-                    sd_rd <= 0;  // Clear read request after one cycle
-                    if (!sd_ready) begin  // Controller is now reading
-                        sd_state <= SD_SCAN_DATA;
-                    end
-                end
-                
                 SD_SCAN_DATA: begin
+                    // Check for Abort/Timeout
+                    if (sd_ready && byte_index < 512) begin
+                       // Controller aborted (Timeout)
+                       sd_state <= SD_NEXT_SECTOR;
+                    end
+                    
                     // Detect rising edge of sd_byte_available
-                    if (sd_byte_available && !sd_byte_available_d) begin
+                    else if (sd_byte_available && !sd_byte_available_d) begin
                         // Shift new byte into pattern buffer
                         pattern_buf <= {pattern_buf[79:0], sd_dout};
                         byte_index <= byte_index + 1;
                         
+                        // STATE MACHINE: HUNT -> CAPTURE -> PLAYBACK
+                        if (!capture_active) begin
+                            // DIAGNOSTIC SCOPE: Capture FIRST 4 BYTES of SECTOR 0 (of scan)
+                            // To see if we catch MBR (often starts with FA, 33, C0, 8E...)
+                            // or FAT32 Volume ID (EB 58 90...)
+                            if (sector_count == 0 && byte_index < 4) begin
+                                // Using playback_timer to store bytes temporarily? 
+                                // No, use pattern_buf. 
+                                // pattern_buf shifts left. 
+                                // After 4 bytes, pattern_buf[31:0] has the data.
+                                // We can use a separate register for scope? 
+                                // Let's just FORCE capture active after 4 bytes IF we haven't found G?
+                                // No, user wants to see G if it exists.
+                                // But if G not found, show S0 bytes.
+                                case (byte_index)
+                                    0: playback_timer[7:0]   <= sd_dout;
+                                    1: playback_timer[15:8]  <= sd_dout;
+                                    2: playback_timer[23:16] <= sd_dout;
+                                    3: playback_timer[25:24] <= sd_dout[1:0]; // Partial
+                                endcase
+                            end
+
+                            // HUNTING for 'G'
+                            if (sd_dout == "G") begin
+                                capture_active <= 1;
+                                capture_count <= 0;
+                                led_0_toggle <= 1; // Solid ON to indicate trigger
+                            end
+                            // FALLBACK: If we finish Sector 0 and haven't found G...
+                            // Actually, let's just capture the first 4 bytes into a debug register
+                            if (sector_count == 0 && byte_index < 4) begin
+                                case (byte_index)
+                                    0: playback_timer[7:0]   <= sd_dout;
+                                    1: playback_timer[15:8]  <= sd_dout;
+                                    2: playback_timer[23:16] <= sd_dout;
+                                    3: playback_timer[25:24] <= sd_dout[1:0]; // Partial
+                                endcase
+                            end
+                        end else begin
+                            // CAPTURING subsequent chars (A, M, E...)
+                            capture_count <= capture_count + 1;
+                            if (capture_count >= 10) begin
+                                // Captured enough! Start Playback
+                                sd_state <= SD_PLAYBACK_PATTERN;
+                                playback_timer <= 0;
+                                playback_index <= 0;
+                            end
+                        end
+
                         // Check for "GAMEx   A78" pattern after receiving 11 bytes
                         if (byte_index >= 10) begin
-                            if (pattern_buf[87:80] == "G" && 
-                                pattern_buf[79:72] == "A" &&
-                                pattern_buf[71:64] == "M" &&
-                                pattern_buf[63:56] == "E" &&
-                               (pattern_buf[55:48] >= "0" && pattern_buf[55:48] <= "5") &&
-                                pattern_buf[47:40] == " " &&
-                                pattern_buf[39:32] == " " &&
-                                pattern_buf[31:24] == " " &&
-                                pattern_buf[23:16] == "A" &&
-                                pattern_buf[15:8] == "7" &&
-                                pattern_buf[7:0] == "8") begin
+                            if (pattern_buf[87:80] == 8'h47 &&  // 'G'
+                                pattern_buf[79:72] == 8'h41 &&  // 'A'
+                                pattern_buf[71:64] == 8'h4D &&  // 'M'
+                                pattern_buf[63:56] == 8'h45 &&  // 'E'
+                               (pattern_buf[55:48] >= 8'h30 && pattern_buf[55:48] <= 8'h35) &&  // '0'-'5'
+                                pattern_buf[47:40] == 8'h20 &&  // ' '
+                                pattern_buf[39:32] == 8'h20 &&  // ' '
+                                pattern_buf[31:24] == 8'h20 &&  // ' '
+                                pattern_buf[23:16] == 8'h41 &&  // 'A'
+                                pattern_buf[15:8]  == 8'h37 &&  // '7'
+                                pattern_buf[7:0]   == 8'h38) begin  // '8'
                                 // Found a game file!
-                                files_found[pattern_buf[55:48] - "0"] <= 1;
-                                if (!files_found[pattern_buf[55:48] - "0"])
+                                files_found[pattern_buf[55:48] - 8'h30] <= 1;
+                                if (!files_found[pattern_buf[55:48] - 8'h30])
                                     file_count <= file_count + 1;
                             end
                         end
                     end
                     
                     if (sd_ready) begin  // Read complete
-                        sd_state <= SD_NEXT_SECTOR;
+                        sector_count <= sector_count + 1;
+                        if (sd_state != SD_PLAYBACK_PATTERN) sd_state <= SD_NEXT_SECTOR;
                     end
                 end
                 
+                SD_PLAYBACK_PATTERN: begin
+                    // Cycle through the buffer to show what we found
+                    if (playback_timer < 26'h2000000) begin // ~1s
+                        playback_timer <= playback_timer + 1;
+                    end else begin
+                        playback_timer <= 0;
+                        playback_index <= playback_index + 1;
+                        if (playback_index >= 10) playback_index <= 0; // Loop
+                        
+                        case (playback_index)
+                            0: led_debug_byte <= pattern_buf[87:80]; // G
+                            1: led_debug_byte <= pattern_buf[79:72]; // A
+                            2: led_debug_byte <= pattern_buf[71:64]; // M
+                            3: led_debug_byte <= pattern_buf[63:56]; // E
+                            4: led_debug_byte <= pattern_buf[55:48]; // 0
+                            5: led_debug_byte <= pattern_buf[47:40]; // .
+                            6: led_debug_byte <= pattern_buf[39:32]; // A
+                            7: led_debug_byte <= pattern_buf[31:24]; // 7
+                            8: led_debug_byte <= pattern_buf[23:16]; // 8
+                            9: led_debug_byte <= pattern_buf[15:8];  // space
+                            10: led_debug_byte <= pattern_buf[7:0];  // space
+                        endcase
+                    end
+                end
+
                 SD_NEXT_SECTOR: begin
-                    // Scan 100 sectors (files at ~2055 per grep)
-                    if (file_count >= 6 || sector_num >= (2050 + 100)) begin
+                    // Scan 2000 sectors
+                    if (file_count >= 6 || sector_count >= 2000) begin
                         sd_state <= SD_DONE;
                         sd_init_done <= 1;
+                        // Setup fallback display
+                        playback_index <= 0;
                     end else begin
                         sector_num <= sector_num + 1;
                         sd_state <= SD_START_READ;
@@ -277,6 +395,24 @@ module top (
                 end
                 
                 SD_DONE: begin
+                    // If no files found, cycle the captured Scope Bytes (Sector 0)
+                    if (file_count == 0) begin
+                        if (sector_num[25] == 0) sector_num <= sector_num + 1; // Use as timer
+                        else begin
+                            sector_num <= 0; 
+                            playback_index <= playback_index + 1;
+                            if (playback_index >= 4) playback_index <= 0;
+                            
+                            case (playback_index)
+                                // displaying captured playback_timer bytes
+                                0: led_debug_byte <= playback_timer[7:0];
+                                1: led_debug_byte <= playback_timer[15:8];
+                                2: led_debug_byte <= playback_timer[23:16];
+                                3: led_debug_byte <= {6'b0, playback_timer[25:24]}; 
+                            endcase
+                        end
+                        led_0_toggle <= 1; // Turn on LED 0 to indicate "Done/Scope Mode"
+                    end
                     sd_init_done <= 1;
                 end
             endcase
@@ -393,7 +529,7 @@ module top (
         end
     end
 
-    // File count blinker - blink LED[4] <file_count> times
+    // File count indicator - count LED blinks
     reg [24:0] blink_counter;
     reg [2:0] blink_phase;  // Which blink in the sequence (0-file_count)
     
@@ -408,15 +544,16 @@ module top (
         end
     end
     
-    wire led4_blink = (blink_phase > 0 && blink_phase <= file_count) ? blink_counter[23] : 1'b1;
+    // LED[4] blinks <file_count> times, then pauses
+    wire led4_pattern = (blink_phase > 0 && blink_phase <= file_count) ? blink_counter[23] : 1'b0;
     
-    // LED Assignments (FILE COUNT MODE)
-    // Active LOW LEDs - Show our SD state machine status
-    assign led[0] = ~sd_state[0];                         // Our state bit 0
-    assign led[1] = ~sd_state[1];                         // Our state bit 1  
-    assign led[2] = ~sd_state[2];                         // Our state bit 2
-    assign led[3] = ~sd_ready;                            // SD controller ready (ON when ready)
-    assign led[4] = ~sd_rd;                               // Read request active
-    assign led[5] = ~sd_byte_available;                   // Byte available pulse
-
+    // LED Assignments (DIAGNOSTIC MODE)
+    // Active LOW LEDs. 
+    assign led[0] = ~(capture_active | led_0_toggle); // ON if Found OR Done
+    assign led[1] = ~led_debug_byte[0];         // Data Bit 0
+    assign led[2] = ~led_debug_byte[1];         // Data Bit 1
+    assign led[3] = ~led_debug_byte[2];         // Data Bit 2
+    assign led[4] = ~led_debug_byte[3];         // Data Bit 3
+    assign led[5] = ~heartbeat[23];             // HEARTBEAT
+    
 endmodule

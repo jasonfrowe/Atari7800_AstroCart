@@ -36,7 +36,6 @@ module sd_controller(
     input [31:0] address,   // Memory address for read/write operation. This MUST 
                             // be a multiple of 512 bytes, due to SD sectoring.
     input clk,  // normal speed clock
-    input clk_pulse_slow, // pulsed slow clock
     output [4:0] status, // For debug purposes: Current state of controller.
     output reg [7:0] recv_data
 );
@@ -79,24 +78,64 @@ module sd_controller(
     
     reg [26:0] boot_counter = 27'd050_000;
     reg [7:0] reset_counter = 0;
+    
+    // CLOCK GENERATION
+    // SysClk = 81MHz (from Gowin PLL)
+    
+    // Slow Clock Target: < 400kHz
+    // 81MHz / 256 = 316kHz. (Bit 8)
+    reg [7:0] slow_div; 
+    
+    // Fast Clock Target: ~5MHz (Safer for breadboard)
+    // 81MHz / 16 = 5.06MHz. (Bit 4)
+    reg [3:0] fast_div;       
+    
+    reg high_speed_mode;
+    
+    always @(posedge clk) begin
+        if (reset) begin
+            slow_div <= 0;
+            fast_div <= 0;
+            high_speed_mode <= 0;
+        end else begin
+            slow_div <= slow_div + 1;
+            fast_div <= fast_div + 1;
+            // Robust Switch: Init states are < 6. IDLE is 6. Read/Write > 6.
+            if (state >= 6) high_speed_mode <= 1; 
+        end
+    end
+    
+    wire tick_slow = (slow_div == 0);
+    wire tick_fast = (fast_div == 0);
+    
+    // Dynamic Clock Switching
+    wire clock_enable = high_speed_mode ? tick_fast : tick_slow; 
+    // wire clock_enable = tick_slow; // DEBUG override removed
+    
     always @(posedge clk) begin
         if(reset == 1) begin
             state <= RST;
             sclk_sig <= 0;
-            //boot_counter <= 27'd100_000_000;
             boot_counter <= 27'd005_000;
-            //boot_counter <= 27'd001_000;
             cmd_mode <= 1;
             cs <= 1;
             cmd_out <= {56{1'b1}};
             data_sig <= 8'hFF;
-            if (clk_pulse_slow) begin
+            byte_available <= 0;
+            ready_for_next_byte <= 0;
+            dout <= 8'h00;
+            recv_data <= 8'h00;
+            byte_counter <= 0;
+            bit_counter <= 0;
+            return_state <= RST;
+            response_type <= 3'b1;
+            if (clock_enable) begin
                 reset_counter <= reset_counter + 1;
                 if (reset_counter[2]) sclk_sig <= ~sclk_sig;
             end
         end
         else begin
-            if (clk_pulse_slow) begin
+            if (clock_enable) begin
             case(state)
                 RST: begin
                     if(boot_counter == 0) begin
@@ -111,10 +150,10 @@ module sd_controller(
                         state <= INIT;
                     end
                     else begin
-                        // <400KHz startup init
+                        // Startup Wait (at 200kHz, 50k ticks = 0.25s)
                         boot_counter <= boot_counter - 1;
-                        if (boot_counter[2]) sclk_sig <= ~sclk_sig;
-                        //sclk_sig <= ~sclk_sig; // I added this
+                        // if (boot_counter[2]) sclk_sig <= ~sclk_sig; // Don't toggle yet, just wait?
+                        sclk_sig <= 1; // Keep clock High during IDLE/Wait
                     end
                 end
                 INIT: begin
@@ -182,6 +221,7 @@ module sd_controller(
                     cmd_out <= {16'hFF_51, address, 8'hFF};
                     bit_counter <= 55;
                     response_type <= 3'b1;
+                    boot_counter <= 50_000; // Timeout ~10ms at 5MHz
                     return_state <= READ_BLOCK_WAIT;
                     state <= SEND_CMD;
                 end
@@ -191,6 +231,10 @@ module sd_controller(
                         bit_counter <= 7;
                         return_state <= READ_BLOCK_DATA;
                         state <= RECEIVE_BYTE;
+                    end else if (boot_counter == 0) begin
+                        state <= IDLE; // Timeout!
+                    end else begin
+                        boot_counter <= boot_counter - 1;
                     end
                     sclk_sig <= ~sclk_sig;
                 end
@@ -310,6 +354,16 @@ module sd_controller(
                         end
                     end
                     sclk_sig <= ~sclk_sig;
+                end
+                default: begin
+                    // If we get into an invalid state, reset everything
+                    state <= RST;
+                    sclk_sig <= 0;
+                    boot_counter <= 27'd005_000;
+                    cmd_mode <= 1;
+                    cs <= 1;
+                    cmd_out <= {56{1'b1}};
+                    data_sig <= 8'hFF;
                 end
             endcase
             end
