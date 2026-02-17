@@ -56,13 +56,105 @@ module top (
     initial $readmemh("game.hex", rom_memory);
 
     wire [15:0] rom_index = a_safe - 16'h4000;
+    
+    // Handover Registers
+    reg busy;
+    reg armed;
+    
+    // Status Byte: 0x00=Busy (Loading), 0x80=Done/Ready
+    wire [7:0] status_byte = busy ? 8'h00 : 8'h80;
 
-    // ROM Fetch (High Speed) / PSRAM Read
+    // Checksum Logic
+    reg [31:0] checksum;
+    
+    // Hex-to-ASCII converter helper
+    function [7:0] to_hex_ascii (input [3:0] nibble);
+        to_hex_ascii = (nibble < 10) ? (8'h30 + nibble) : (8'h37 + nibble);
+    endfunction
+
+    // ROM Fetch / PSRAM Read / Status Read
     always @(posedge sys_clk) begin
-        if (game_loaded) begin
-             data_out <= psram_dout_bus; // Read from PSRAM latch/wire
+        if (!game_loaded && a_safe == 16'h0458 && rw_safe) begin
+             // Status Read (POKEY Base + 8)
+             data_out <= status_byte;
+        end
+        else if (game_loaded) begin
+             data_out <= psram_dout_bus; 
         end else begin
-            if (rom_index < 49152) data_out <= rom_memory[rom_index];
+            // --- DIAGNOSTIC ROM OVERRIDE ($7F00-$7F3F) ---
+            if (a_safe >= 16'h7F00 && a_safe <= 16'h7F3F) begin
+                case (a_safe[5:4])
+                    2'b00: begin // $7F00-$7F0F: CRC
+                        case (a_safe[3:0])
+                            4'h0: data_out <= 8'h43; // 'C'
+                            4'h1: data_out <= 8'h52; // 'R'
+                            4'h2: data_out <= 8'h43; // 'C'
+                            4'h3: data_out <= 8'h3A; // ':'
+                            4'h4: data_out <= 8'h20; // ' '
+                            4'h5: data_out <= to_hex_ascii(checksum[31:28]);
+                            4'h6: data_out <= to_hex_ascii(checksum[27:24]);
+                            4'h7: data_out <= to_hex_ascii(checksum[23:20]);
+                            4'h8: data_out <= to_hex_ascii(checksum[19:16]);
+                            4'h9: data_out <= to_hex_ascii(checksum[15:12]);
+                            4'hA: data_out <= to_hex_ascii(checksum[11:8]);
+                            4'hB: data_out <= to_hex_ascii(checksum[7:4]);
+                            4'hC: data_out <= to_hex_ascii(checksum[3:0]);
+                            default: data_out <= 8'h20;
+                        endcase
+                    end
+                    2'b01: begin // $7F10-$7F1F: ST/BC
+                        case (a_safe[3:0])
+                            4'h0: data_out <= 8'h53; // 'S'
+                            4'h1: data_out <= 8'h54; // 'T'
+                            4'h2: data_out <= 8'h3A; // ':'
+                            4'h3: data_out <= to_hex_ascii({1'b0, sd_state});
+                            4'h4: data_out <= 8'h20; 
+                            4'h5: data_out <= 8'h42; // 'B'
+                            4'h6: data_out <= 8'h43; // 'C'
+                            4'h7: data_out <= 8'h3A;
+                            4'h8: data_out <= to_hex_ascii({2'b0, byte_index[9:8]});
+                            4'h9: data_out <= to_hex_ascii(byte_index[7:4]);
+                            4'hA: data_out <= to_hex_ascii(byte_index[3:0]);
+                            default: data_out <= 8'h20;
+                        endcase
+                    end
+                    2'b10: begin // $7F20-$7F2F: SC
+                        case (a_safe[3:0])
+                            4'h0: data_out <= 8'h53; // 'S'
+                            4'h1: data_out <= 8'h43; // 'C'
+                            4'h2: data_out <= 8'h3A; // ':'
+                            4'h3: data_out <= to_hex_ascii({1'b0, current_sector[6:4]});
+                            4'h4: data_out <= to_hex_ascii(current_sector[3:0]);
+                            4'h5: data_out <= 8'h20;
+                            4'h6: data_out <= 8'h4C; // 'L' (Last Byte)
+                            4'h7: data_out <= 8'h3A;
+                            4'h8: data_out <= to_hex_ascii(last_byte_captured[7:4]);
+                            4'h9: data_out <= to_hex_ascii(last_byte_captured[3:0]);
+                            default: data_out <= 8'h20;
+                        endcase
+                    end
+                    2'b11: begin // $7F30-$7F3F: First Bytes Peak (Hex String)
+                        case (a_safe[3:0])
+                            4'h0: data_out <= 8'h48; // 'H'
+                            4'h1: data_out <= 8'h3A; // ':'
+                            4'h2: data_out <= to_hex_ascii(first_bytes[0][7:4]);
+                            4'h3: data_out <= to_hex_ascii(first_bytes[0][3:0]);
+                            4'h4: data_out <= 8'h20;
+                            4'h5: data_out <= to_hex_ascii(first_bytes[1][7:4]);
+                            4'h6: data_out <= to_hex_ascii(first_bytes[1][3:0]);
+                            4'h7: data_out <= 8'h20;
+                            4'h8: data_out <= to_hex_ascii(first_bytes[2][7:4]);
+                            4'h9: data_out <= to_hex_ascii(first_bytes[2][3:0]);
+                            4'hA: data_out <= 8'h20;
+                            4'hB: data_out <= to_hex_ascii(first_bytes[3][7:4]);
+                            4'hC: data_out <= to_hex_ascii(first_bytes[3][3:0]);
+                            default: data_out <= 8'h20;
+                        endcase
+                    end
+                    default: data_out <= 8'h20;
+                endcase
+            end
+            else if (rom_index < 49152) data_out <= rom_memory[rom_index];
             else data_out <= 8'hFF;
         end
     end
@@ -287,6 +379,7 @@ module top (
     reg [87:0] pattern_buf;         // 11-byte sliding window for "GAMEx   A78"
     reg sd_byte_available_d;        // Delayed signal for edge detection
     reg [15:0] sector_count;        // Number of sectors scanned
+    reg [7:0] sd_dout_reg;          // Registered SD data
     
     // Capture/Playback Registers
     reg capture_active;
@@ -301,11 +394,9 @@ module top (
     reg [31:0] file_cluster;
     reg [31:0] debug_data_trap;
 
-    // Game Loader Registers
-    reg [8:0] loading_sector_cnt;
+    reg [7:0] first_bytes [0:7];
+    reg [7:0] last_byte_captured;
     reg [22:0] psram_load_addr;
-    reg header_found;
-    reg loading_phase;
     reg game_loaded;
         
     // Simplified Sequential Loader (Full Implementation)
@@ -333,13 +424,26 @@ module top (
              psram_wr_req <= 0;
              write_buffer <= 0;
              write_pending <= 0;
+             busy <= 0;
+             armed <= 0;
              
              current_sector <= 0;
              psram_load_addr <= 0;
              sd_byte_available_d <= 0;
              pattern_buf <= 0;
+             checksum <= 0;
+             sd_dout_reg <= 0;
         end else begin
              sd_byte_available_d <= sd_byte_available;
+
+              // --- INDEPENDENT PSRAM WRITE HANDSHAKE ---
+              if (write_pending && !psram_busy) begin
+                   psram_wr_req <= 1;
+                   psram_load_addr <= psram_load_addr + 1;
+                   write_pending <= 0;
+              end else begin
+                   psram_wr_req <= 0;
+              end
              
              case (sd_state)
                  SD_IDLE: begin
@@ -354,56 +458,50 @@ module top (
                  end
                  
                  SD_WAIT: begin
-                     if (!sd_ready) begin
-                         sd_rd <= 0;
-                         sd_state <= SD_DATA;
-                     end
-                 end
-                 
-                 SD_DATA: begin
-                     if (sd_ready && byte_index < 512) begin
-                         // Abort
-                         sd_state <= SD_NEXT; 
-                         led_debug_byte <= 8'hFF; 
-                     end else if (sd_byte_available && !sd_byte_available_d) begin
+                      if (sd_byte_available && !sd_byte_available_d) begin
+                          sd_dout_reg <= sd_dout;
+                          sd_state <= SD_DATA;
+                      end else if (byte_index >= 512 && !write_pending) begin
+                          sd_state <= SD_NEXT;
+                      end else if (sd_ready && byte_index > 0 && !write_pending) begin
+                          sd_state <= SD_NEXT;
+                      end
+                  end
+                  
+                  SD_DATA: begin
                          // 1. Capture Data
-                         write_buffer <= sd_dout;
+                         write_buffer <= sd_dout_reg;
                          
                          // Skip 128-byte Header in Sector 0
                          if (current_sector > 0 || byte_index >= 128) begin
                              write_pending <= 1;
+                             checksum <= checksum + sd_dout_reg;
+                             last_byte_captured <= sd_dout_reg;
+                             
+                             // Capture first 8 bytes for debugging
+                             if (current_sector == 0 && byte_index == 128) first_bytes[0] <= sd_dout_reg;
+                             if (current_sector == 0 && byte_index == 129) first_bytes[1] <= sd_dout_reg;
+                             if (current_sector == 0 && byte_index == 130) first_bytes[2] <= sd_dout_reg;
+                             if (current_sector == 0 && byte_index == 131) first_bytes[3] <= sd_dout_reg;
+                             if (current_sector == 0 && byte_index == 132) first_bytes[4] <= sd_dout_reg;
+                             if (current_sector == 0 && byte_index == 133) first_bytes[5] <= sd_dout_reg;
+                             if (current_sector == 0 && byte_index == 134) first_bytes[6] <= sd_dout_reg;
+                             if (current_sector == 0 && byte_index == 135) first_bytes[7] <= sd_dout_reg;
                          end
                          
                          byte_index <= byte_index + 1;
-                     end
-                     
-                     // 2. Service Write (Handshake with PSRAM Busy)
-                     if (write_pending && !psram_busy) begin
-                          psram_wr_req <= 1;
-                          psram_load_addr <= psram_load_addr + 1;
-                          write_pending <= 0;
-                     end else begin
-                          psram_wr_req <= 0;
-                     end
-                     
-                     // 3. Transition when complete (Wait for pending write)
-                     // If byte_index reached 512, all bytes received.
-                     if (byte_index >= 512) begin
-                         if (!write_pending) begin 
-                              sd_state <= SD_NEXT;
-                         end
-                     end
-                 end
+                         sd_state <= SD_WAIT;
+                  end
                  
                  SD_NEXT: begin
                      psram_wr_req <= 0;
-                     if (current_sector >= GAME_SIZE_SECTORS - 1) begin
-                         sd_state <= SD_COMPLETE;
-                     end else begin
-                         current_sector <= current_sector + 1;
-                         sd_state <= SD_START;
-                     end
-                 end
+                     if (current_sector < 96) begin // 0 to 96 = 97 sectors
+                          current_sector <= current_sector + 1;
+                          sd_state <= SD_START;
+                      end else begin
+                          sd_state <= SD_COMPLETE;
+                      end
+                  end
                  
                  SD_COMPLETE: begin
                      // Load Done. 
@@ -413,6 +511,14 @@ module top (
                      // Safety: Only trigger if NOT already loaded.
                      if (!game_loaded && a_safe == 16'h0458 && !rw_safe && phi2_safe) begin
                          if (d[7]) game_loaded <= 1;
+                         else if (d[6]) begin
+                             // RELOAD Trigger (for testing)
+                             sd_state <= SD_START;
+                             current_sector <= 0;
+                             psram_load_addr <= 0;
+                             checksum <= 0;
+                             busy <= 1;
+                         end
                      end
                  end
              endcase

@@ -68,8 +68,8 @@ draw_title
  ;
  ; Draw title and instructions
  ;
- plotchars 'GAME LOADER' 0 80 0
- plotchars 'SELECT A GAME' 1 70 2
+ plotchars 'GAME LOADER' 0 60 0
+ plotchars 'SELECT A GAME' 1 60 2
  return
 
 draw_game_list
@@ -81,6 +81,10 @@ draw_game_list
  plotchars 'GALAGA'           0 10 8
  plotchars 'MS PAC-MAN'       0 10 10
  plotchars 'DEFENDER'         0 10 12
+ plotchars $7F00 1 10 13 13
+ plotchars $7F10 1 90 13 11
+ plotchars $7F20 1 10 14 13
+ plotchars $7F30 1 90 14 13
  return
 
 
@@ -93,6 +97,9 @@ draw_cursor
  plotchars ' ' 0 0 8
  plotchars ' ' 0 0 10
  plotchars ' ' 0 0 12
+ plotchars ' ' 0 0 14
+ plotchars ' ' 0 0 15
+ plotchars ' ' 0 0 16
  
  ;
  ; Calculate and draw cursor at current selection
@@ -107,13 +114,19 @@ check_input
  ;
  if joy0up then selected_game = selected_game - 1 : joy_delay = 15
  if joy0down then selected_game = selected_game + 1 : joy_delay = 15
+ 
+ ; Trigger Reload (Right + Fire)
+ if joy0fire0 && joy0right then fpga_trigger = 64 : joy_delay = 30 : goto select_game_end
+ 
  if joy0fire0 then gosub select_game : joy_delay = 15
+ 
+select_game_end
  
  ;
  ; Keep selected_game in bounds
  ;
- if selected_game > 4 then selected_game = 0
- if selected_game > 127 then selected_game = 4
+ if selected_game > 7 then selected_game = 0
+ if selected_game > 127 then selected_game = 7
  return
 
 move_up
