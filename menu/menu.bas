@@ -27,7 +27,7 @@
  ; FPGA trigger address - just accessing this address triggers FPGA detection
  ; Located in 7800basic user RAM space ($2200-$27FF)
  ;
- dim fpga_trigger = $2200
+ dim fpga_trigger = $0458
  
  ;
  ; Initialize variables
@@ -142,10 +142,10 @@ flash_loop
  if flash_count > 0 then goto flash_loop
  
  ;
- ; Trigger FPGA: write selected game to $2200
- ; FPGA will snoop the address bus and detect this access
+ ; Trigger FPGA: write selected game + 128 to $2200
+ ; This sets bit 7, allowing FPGA to distinguish from initialization (0).
  ;
- fpga_trigger = selected_game
+ fpga_trigger = selected_game + 128
  
  ;
  ; For now, just loop (later we'll add game loading)

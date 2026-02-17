@@ -164,7 +164,12 @@ module top (
     wire psram_data_valid;
     
     wire [21:0] psram_addr_mux = game_loaded ? {6'b0, a_safe} : psram_load_addr[21:0];
-    wire [7:0]  psram_din_mux  = sd_dout; // Only write from SD
+    
+    // Write Buffer for Reliable Data Transfer
+    reg [7:0] write_buffer;
+    reg write_pending;
+    
+    wire [7:0]  psram_din_mux  = write_buffer; // Buffered Data
     
     psram_byte_controller psram_ctrl (
         .clk(clk_81m),
@@ -191,30 +196,30 @@ module top (
     // PSRAM Read/Write Logic (CDC Handshake)
     
     // 1. Read Logic (Game Mode)
-    // Trigger read on rising edge of `should_drive` (Atari Read Request)
+    // Trigger read on Address Change (Prefetch) to gain timing margin.
     reg should_drive_d;
     always @(posedge sys_clk) should_drive_d <= should_drive;
-    wire start_read = should_drive && !should_drive_d; 
     
-    reg [7:0] psram_latched_data;
+    reg [15:0] a_prev;
+    reg rw_prev;
     
     always @(posedge sys_clk) begin
+        a_prev <= a_safe;
+        rw_prev <= rw_safe;
+        
         if (!sd_reset) begin
-             // READ REQUEST
-             if (game_loaded && start_read) begin
-                  psram_rd_req <= 1;
+             // READ REQUEST (Trigger on Address or RW change)
+             if (game_loaded && is_rom && rw_safe && ((a_safe != a_prev) || (rw_safe != rw_prev))) begin
+                   psram_rd_req <= 1;
              end
              else if (psram_busy) begin 
-                  // Acknowledged by 81MHz domain
-                  psram_rd_req <= 0; 
-                  // psram_wr_req is handled in SD State Machine
+                   // Acknowledged by 81MHz domain
+                   psram_rd_req <= 0; 
              end
-             
-             // WRITE REQUEST is set in SD State Machine
-             // We need to coordinate with the SD Loop.
-             // See SD State Machine updates.
+             else if (!game_loaded) psram_rd_req <= 0; // Menu Mode safety
         end
     end
+
     
     // Capture Read Data
     // Note: read_data from controller is stable until next read.
@@ -326,6 +331,8 @@ module top (
              led_0_toggle <= 0;
              game_loaded <= 0;
              psram_wr_req <= 0;
+             write_buffer <= 0;
+             write_pending <= 0;
              
              current_sector <= 0;
              psram_load_addr <= 0;
@@ -357,23 +364,34 @@ module top (
                      if (sd_ready && byte_index < 512) begin
                          // Abort
                          sd_state <= SD_NEXT; 
-                         led_debug_byte <= 8'hFF; // Error
+                         led_debug_byte <= 8'hFF; 
                      end else if (sd_byte_available && !sd_byte_available_d) begin
-                         // Data Byte Received
+                         // 1. Capture Data
+                         write_buffer <= sd_dout;
                          
-                         // WRITE TO PSRAM (Skip 128-byte Header in Sector 0)
+                         // Skip 128-byte Header in Sector 0
                          if (current_sector > 0 || byte_index >= 128) begin
-                             psram_wr_req <= 1;
-                             psram_load_addr <= psram_load_addr + 1;
+                             write_pending <= 1;
                          end
                          
                          byte_index <= byte_index + 1;
-                         
-                         if (byte_index == 511) begin
-                             sd_state <= SD_NEXT;
-                         end
+                     end
+                     
+                     // 2. Service Write (Handshake with PSRAM Busy)
+                     if (write_pending && !psram_busy) begin
+                          psram_wr_req <= 1;
+                          psram_load_addr <= psram_load_addr + 1;
+                          write_pending <= 0;
                      end else begin
-                         psram_wr_req <= 0; // Clear Write Request
+                          psram_wr_req <= 0;
+                     end
+                     
+                     // 3. Transition when complete (Wait for pending write)
+                     // If byte_index reached 512, all bytes received.
+                     if (byte_index >= 512) begin
+                         if (!write_pending) begin 
+                              sd_state <= SD_NEXT;
+                         end
                      end
                  end
                  
@@ -389,9 +407,13 @@ module top (
                  
                  SD_COMPLETE: begin
                      // Load Done. 
-                     // DO NOT TRIGGER GAME.
-                     // Just sit here.
-                     led_0_toggle <= 0; // Stop toggling? Or set to Done state.
+                     // Wait for Menu Trigger ($0458 Write - POKEY Base + 8)
+                     // Using POKEY address avoids RAM initialization conflicts.
+                     // Filter: Require Bit 7 High (Magic Value).
+                     // Safety: Only trigger if NOT already loaded.
+                     if (!game_loaded && a_safe == 16'h0458 && !rw_safe && phi2_safe) begin
+                         if (d[7]) game_loaded <= 1;
+                     end
                  end
              endcase
         end
