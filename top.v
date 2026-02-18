@@ -96,21 +96,22 @@ module top (
             if (a_safe >= 16'h7F00 && a_safe <= 16'h7FBF) begin
                 // Use a_safe[7:4] to select the diagnostic output (0-B = 12 outputs)
                 case (a_safe[7:4])
-                    4'h0: begin // $x400: CRC
+                    4'h0: begin // $x400: SD Word 0 (A9 50 85 3C)
                         case (a_safe[3:0])
-                            4'h0: data_out <= 8'h43; // 'C'
-                            4'h1: data_out <= 8'h52; // 'R'
-                            4'h2: data_out <= 8'h43; // 'C'
-                            4'h3: data_out <= 8'h3A; // ':'
-                            4'h4: data_out <= 8'h20; // ' '
-                            4'h5: data_out <= to_hex_ascii(checksum[31:28]);
-                            4'h6: data_out <= to_hex_ascii(checksum[27:24]);
-                            4'h7: data_out <= to_hex_ascii(checksum[23:20]);
-                            4'h8: data_out <= to_hex_ascii(checksum[19:16]);
-                            4'h9: data_out <= to_hex_ascii(checksum[15:12]);
-                            4'hA: data_out <= to_hex_ascii(checksum[11:8]);
-                            4'hB: data_out <= to_hex_ascii(checksum[7:4]);
-                            4'hC: data_out <= to_hex_ascii(checksum[3:0]);
+                            4'h0: data_out <= 8'h53; // 'S'
+                            4'h1: data_out <= 8'h44; // 'D'
+                            4'h2: data_out <= 8'h3A; // ':'
+                            4'h3: data_out <= to_hex_ascii(first_bytes[0][7:4]);
+                            4'h4: data_out <= to_hex_ascii(first_bytes[0][3:0]);
+                            4'h5: data_out <= 8'h20;
+                            4'h6: data_out <= to_hex_ascii(first_bytes[1][7:4]);
+                            4'h7: data_out <= to_hex_ascii(first_bytes[1][3:0]);
+                            4'h8: data_out <= 8'h20;
+                            4'h9: data_out <= to_hex_ascii(first_bytes[2][7:4]);
+                            4'hA: data_out <= to_hex_ascii(first_bytes[2][3:0]);
+                            4'hB: data_out <= 8'h20;
+                            4'hC: data_out <= to_hex_ascii(first_bytes[3][7:4]);
+                            4'hD: data_out <= to_hex_ascii(first_bytes[3][3:0]);
                             default: data_out <= 8'h20;
                         endcase
                     end
@@ -408,12 +409,8 @@ module top (
     reg [7:0] write_buffer;
     reg write_pending;
     
-    // V53: FORCE 0xA5 to Address 0
-    wire [7:0] psram_din_mux = (psram_load_addr[21:0] == 0) ? 8'hA5 : 
-                                (psram_load_addr[21:0] == 1) ? 8'h5A : 
-                                (psram_load_addr[21:0] == 2) ? 8'h85 : 
-                                (psram_load_addr[21:0] == 3) ? 8'h3C : 
-                                write_buffer;
+    // V61: Removed forced data to see actual file content
+    wire [7:0] psram_din_mux = write_buffer;
     
     // Gowin PSRAM IP signals (32-bit interface)
     reg         ip_cmd_en;
@@ -450,16 +447,12 @@ module top (
     // Use latched address for masking too
     reg [3:0] ip_data_mask_dyn;
     always @(*) begin
-        if (latched_ip_addr_reg[21:0] == 22'd0) begin
-            ip_data_mask_dyn = 4'b0000; // Force Write All Bytes for Test
-        end else begin
-            case (latched_ip_addr_reg[1:0])
-                2'b00: ip_data_mask_dyn = 4'b1110; 
-                2'b01: ip_data_mask_dyn = 4'b1101; 
-                2'b10: ip_data_mask_dyn = 4'b1011; 
-                2'b11: ip_data_mask_dyn = 4'b0111; 
-            endcase
-        end
+        case (latched_ip_addr_reg[1:0])
+            2'b00: ip_data_mask_dyn = 4'b1011; // Atari Byte 0 -> PSRAM Lane 2
+            2'b01: ip_data_mask_dyn = 4'b0111; // Atari Byte 1 -> PSRAM Lane 3
+            2'b10: ip_data_mask_dyn = 4'b1110; // Atari Byte 2 -> PSRAM Lane 0
+            2'b11: ip_data_mask_dyn = 4'b1101; // Atari Byte 3 -> PSRAM Lane 1
+        endcase
     end
     
     // Assign the dynamic mask
@@ -469,10 +462,10 @@ module top (
     reg [7:0] extracted_byte;
     always @(*) begin
         case (latched_ip_addr_reg[1:0])
-            2'd0: extracted_byte = ip_rd_data[7:0];
-            2'd1: extracted_byte = ip_rd_data[15:8];
-            2'd2: extracted_byte = ip_rd_data[23:16];
-            2'd3: extracted_byte = ip_rd_data[31:24];
+            2'd0: extracted_byte = ip_rd_data[23:16]; // Atari Byte 0 from PSRAM Lane 2
+            2'd1: extracted_byte = ip_rd_data[31:24]; // Atari Byte 1 from PSRAM Lane 3
+            2'd2: extracted_byte = ip_rd_data[7:0];   // Atari Byte 2 from PSRAM Lane 0
+            2'd3: extracted_byte = ip_rd_data[15:8];  // Atari Byte 3 from PSRAM Lane 1
         endcase
     end
     
@@ -820,8 +813,8 @@ module top (
               armed <= 0;
              
              current_sector <= 0;
-             // V51x: Offset by -129 (Header 128 + Pipeline 1) to land at 0x000000
-             psram_load_addr <= 23'h7FFF7F; 
+             // V61: Exact 128-byte offset (byte 128 -> addr 0)
+             psram_load_addr <= 23'h7FFF80; 
              sd_byte_available_d <= 0;
              pattern_buf <= 0;
              checksum <= 0;

@@ -1,24 +1,24 @@
 module gowin_pll (
     input  clkin,
-    output clkout,  // 81MHz for PSRAM IP
-    output clkoutp, // Not used
+    output clkout,  // 81MHz
+    output clkoutp, // 81MHz Phase Shifted -90/90 deg
     output lock
 );
 
     rPLL #(
         .FCLKIN("27"),
         .DEVICE("GW1NR-9C"),
-        .IDIV_SEL(0),       // Input divider: 1
-        .FBDIV_SEL(2),      // Feedback: 27 * (2+1) = 81MHz
-        .ODIV_SEL(8),       // Output divider: Pass-through configuration
+        .IDIV_SEL(0),       // Input / 1
+        .FBDIV_SEL(2),      // Feedback * 3 -> 81MHz
+        .ODIV_SEL(8),       // Output Divider (Default for range)
         .DYN_SDIV_SEL(2),
         .CLKFB_SEL("internal"),
-        .CLKOUT_BYPASS("false"),
-        .CLKOUTP_BYPASS("false"),
+        .CLKOUT_BYPASS("false"),   // MUST BE FALSE (Use PLL)
+        .CLKOUTP_BYPASS("false"),  // MUST BE FALSE (Use PLL Phase Shift)
         .CLKOUTD_BYPASS("true"),
         .DYN_DA_EN("false"),
         .DUTYDA_SEL("1000"),
-        .PSDA_SEL("0100"),  // Phase Shift (typically 90 deg for PSRAM)
+        .PSDA_SEL("0100"),         // 90 Degree Shift (Standard for PSRAM)
         .CLKOUT_FT_DIR(1'b1),
         .CLKOUTP_FT_DIR(1'b1),
         .CLKOUT_DLY_STEP(0),
