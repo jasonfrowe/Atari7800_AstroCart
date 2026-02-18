@@ -367,6 +367,12 @@ module top (
     // Bridge logic to controller interface
     wire psram_cmd_valid = psram_rd_req || psram_wr_req;
     wire psram_cmd_write = psram_wr_req;
+    
+    // [FIX 4] Latch Address for IP Stability
+    // We cannot drive IP address directly from 'a_safe' via MUX because 'a_safe' changes
+    // while IP is busy. We must latch it.
+    reg [21:0] latched_ip_addr_reg;
+
     wire [21:0] psram_cmd_addr = {6'b0, psram_addr_mux};
     
     wire is_psram_diag0 = (!game_loaded && a_safe >= 16'h7F40 && a_safe <= 16'h7F4F);
@@ -434,21 +440,20 @@ module top (
     assign init_calib_synced = init_calib_sync[2];
     
     // Byte-level conversion logic
-    // Address: divide by 4 for 32-bit words, use addr[1:0] for byte select
-    assign ip_addr = psram_cmd_addr[21:2];
+    // [FIX 4] Drive IP Address from LATCHED register, NOT direct Mux
+    assign ip_addr = latched_ip_addr_reg[21:2];
     
     // Write: replicate byte across all 4 bytes
     assign ip_wr_data = {4{psram_din_mux}};
 
     // [FIX 3] Simplified Masking
-    // If writing to Address 0, WRITE ALL BYTES (Mask=0000)
-    // Else use normal byte masking
+    // Use latched address for masking too
     reg [3:0] ip_data_mask_dyn;
     always @(*) begin
-        if (psram_cmd_addr[21:0] == 22'd0) begin
+        if (latched_ip_addr_reg[21:0] == 22'd0) begin
             ip_data_mask_dyn = 4'b0000; // Force Write All Bytes for Test
         end else begin
-            case (psram_cmd_addr[1:0])
+            case (latched_ip_addr_reg[1:0])
                 2'b00: ip_data_mask_dyn = 4'b1110; 
                 2'b01: ip_data_mask_dyn = 4'b1101; 
                 2'b10: ip_data_mask_dyn = 4'b1011; 
@@ -463,7 +468,7 @@ module top (
     // Read: extract byte based on address[1:0]
     reg [7:0] extracted_byte;
     always @(*) begin
-        case (psram_cmd_addr[1:0])
+        case (latched_ip_addr_reg[1:0])
             2'd0: extracted_byte = ip_rd_data[7:0];
             2'd1: extracted_byte = ip_rd_data[15:8];
             2'd2: extracted_byte = ip_rd_data[23:16];
@@ -495,6 +500,7 @@ module top (
             ip_data_buffer <= 8'h00;
             ip_wait_count <= 8'h0;
             ip_is_write <= 1'b0;
+            latched_ip_addr_reg <= 0;
         end else begin
             case (ip_state)
                 IP_WAIT_INIT: begin
@@ -505,7 +511,9 @@ module top (
                 
                 IP_IDLE: begin
                     if (psram_cmd_valid && init_calib_synced) begin
-                        // V51u: Move to SETUP state first to let addr/data stabilize
+                        // [FIX 4] LATCH ADDRESS HERE
+                        latched_ip_addr_reg <= psram_cmd_addr;
+                        
                         ip_wait_count <= 8'h0;
                         ip_is_write <= psram_cmd_write;
                         ip_state <= IP_SETUP;
@@ -516,7 +524,7 @@ module top (
                 
                 IP_SETUP: begin
                     // V51v: Latch byte offset for stable capture
-                    latched_byte_offset <= psram_cmd_addr[1:0];
+                    latched_byte_offset <= latched_ip_addr_reg[1:0];
                     // V51u: One cycle setup, then assert cmd_en
                     ip_cmd_en <= 1'b1;
                     ip_state <= IP_ACTIVE;
