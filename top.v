@@ -186,25 +186,26 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    4'h6: begin // $x460: P2:XX (Addr 0)
+                    4'h6: begin // $x460: P2:XX (Addr 0 - Dedicated Latch)
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h32; // '2'
                             4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(psram_read_latch[7:4]);
-                            4'h4: data_out <= to_hex_ascii(psram_read_latch[3:0]);
+                            4'h3: data_out <= to_hex_ascii(latch_p2[7:4]);
+                            4'h4: data_out <= to_hex_ascii(latch_p2[3:0]);
+                            // Note: Labels A0/A1 are hardcoded below, they don't reflect actual address
                             4'h5: data_out <= 8'h41; // 'A'
                             4'h6: data_out <= 8'h30; // '0'
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    4'h7: begin // $x470: P3:XX (Addr 1)
+                    4'h7: begin // $x470: P3:XX (Addr 1 - Dedicated Latch)
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h33; // '3'
                             4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(psram_read_latch[7:4]);
-                            4'h4: data_out <= to_hex_ascii(psram_read_latch[3:0]);
+                            4'h3: data_out <= to_hex_ascii(latch_p3[7:4]);
+                            4'h4: data_out <= to_hex_ascii(latch_p3[3:0]);
                             4'h5: data_out <= 8'h41; // 'A'
                             4'h6: data_out <= 8'h31; // '1'
                             default: data_out <= 8'h20;
@@ -245,19 +246,19 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    4'hB: begin // $x4B0: P7:XX (32-bit Raw Peek)
+                    4'hB: begin // $x4B0: P7:XX (32-bit Raw Peak - Dedicated Latch)
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h37; // '7'
                             4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(ip_rd_data[31:28]);
-                            4'h4: data_out <= to_hex_ascii(ip_rd_data[27:24]);
-                            4'h5: data_out <= to_hex_ascii(ip_rd_data[23:20]);
-                            4'h6: data_out <= to_hex_ascii(ip_rd_data[19:16]);
-                            4'h7: data_out <= to_hex_ascii(ip_rd_data[15:12]);
-                            4'h8: data_out <= to_hex_ascii(ip_rd_data[11:8]);
-                            4'h9: data_out <= to_hex_ascii(ip_rd_data[7:4]);
-                            4'hA: data_out <= to_hex_ascii(ip_rd_data[3:0]);
+                            4'h3: data_out <= to_hex_ascii(latch_p7[31:28]);
+                            4'h4: data_out <= to_hex_ascii(latch_p7[27:24]);
+                            4'h5: data_out <= to_hex_ascii(latch_p7[23:20]);
+                            4'h6: data_out <= to_hex_ascii(latch_p7[19:16]);
+                            4'h7: data_out <= to_hex_ascii(latch_p7[15:12]);
+                            4'h8: data_out <= to_hex_ascii(latch_p7[11:8]);
+                            4'h9: data_out <= to_hex_ascii(latch_p7[7:4]);
+                            4'hA: data_out <= to_hex_ascii(latch_p7[3:0]);
                             default: data_out <= 8'h20;
                         endcase
                     end
@@ -377,11 +378,14 @@ module top (
     wire is_psram_diag6 = (!game_loaded && a_safe >= 16'h7FA0 && a_safe <= 16'h7FAF);
     wire is_psram_diag7 = (!game_loaded && a_safe >= 16'h7FB0 && a_safe <= 16'h7FBF);
     
+    // [FIX 2] Simplified Address Mux
+    // P2(Diag2), P3(Diag3), P7(Diag6) ALL READ ADDRESS 0
     wire [21:0] psram_addr_mux = (game_loaded)   ? {6'b0, a_safe} - 22'h004000 : 
                                  (is_psram_diag0) ? 22'h000000 : 
                                  (is_psram_diag1) ? 22'h000001 : 
-                                 (is_psram_diag2) ? 22'h000002 : 
-                                 (is_psram_diag3) ? 22'h000003 : 
+                                 (is_psram_diag2) ? 22'h000000 : // P2 Force Addr 0
+                                 (is_psram_diag3) ? 22'h000000 : // P3 Force Addr 0
+                                 (is_psram_diag6) ? 22'h000000 : // P7 Force Addr 0
                                  {psram_load_addr[21:0]};
     
     reg [7:0] psram_read_latch;
@@ -398,7 +402,7 @@ module top (
     reg [7:0] write_buffer;
     reg write_pending;
     
-    // V51m: Force Write Pattern A5/5A/85/3C for addresses 0-3
+    // V53: FORCE 0xA5 to Address 0
     wire [7:0] psram_din_mux = (psram_load_addr[21:0] == 0) ? 8'hA5 : 
                                 (psram_load_addr[21:0] == 1) ? 8'h5A : 
                                 (psram_load_addr[21:0] == 2) ? 8'h85 : 
@@ -433,19 +437,24 @@ module top (
     // Address: divide by 4 for 32-bit words, use addr[1:0] for byte select
     assign ip_addr = psram_cmd_addr[21:2];
     
-    // Write: replicate byte across all 4 bytes, using mask to protect neighbors
+    // Write: replicate byte across all 4 bytes
     assign ip_wr_data = {4{psram_din_mux}};
-    // [FIX 2] Dynamic Data Masking
-    // Gowin PSRAM Mask: 1=Mask (Don't Write), 0=Write
-    // We only want to write the specific byte indicated by psram_cmd_addr[1:0]
+
+    // [FIX 3] Simplified Masking
+    // If writing to Address 0, WRITE ALL BYTES (Mask=0000)
+    // Else use normal byte masking
     reg [3:0] ip_data_mask_dyn;
     always @(*) begin
-        case (psram_cmd_addr[1:0])
-            2'b00: ip_data_mask_dyn = 4'b1110; // Write Byte 0 (LSB)
-            2'b01: ip_data_mask_dyn = 4'b1101; // Write Byte 1
-            2'b10: ip_data_mask_dyn = 4'b1011; // Write Byte 2
-            2'b11: ip_data_mask_dyn = 4'b0111; // Write Byte 3 (MSB)
-        endcase
+        if (psram_cmd_addr[21:0] == 22'd0) begin
+            ip_data_mask_dyn = 4'b0000; // Force Write All Bytes for Test
+        end else begin
+            case (psram_cmd_addr[1:0])
+                2'b00: ip_data_mask_dyn = 4'b1110; 
+                2'b01: ip_data_mask_dyn = 4'b1101; 
+                2'b10: ip_data_mask_dyn = 4'b1011; 
+                2'b11: ip_data_mask_dyn = 4'b0111; 
+            endcase
+        end
     end
     
     // Assign the dynamic mask
@@ -519,14 +528,18 @@ module top (
                     ip_wait_count <= ip_wait_count + 1'b1;
                     
                     if (ip_rd_data_valid) begin
-                        // Read completed - caputure immediately from IP output
-                        // V51v: Use latched offset to select byte
-                        case (latched_byte_offset)
-                            2'd0: ip_data_buffer <= ip_rd_data[7:0];
-                            2'd1: ip_data_buffer <= ip_rd_data[15:8];
-                            2'd2: ip_data_buffer <= ip_rd_data[23:16];
-                            2'd3: ip_data_buffer <= ip_rd_data[31:24];
+                        // Read completed - capture from IP output
+                        // V53: Route to dedicated latch based on source
+                        case (active_req_source)
+                            2'd1: latch_p2 <= ip_rd_data[7:0]; // Force Byte 0
+                            2'd2: latch_p3 <= ip_rd_data[7:0]; // Force Byte 0
+                            2'd3: latch_p7 <= ip_rd_data;
+                            default: ip_data_buffer <= (latched_byte_offset == 0) ? ip_rd_data[7:0] :
+                                                       (latched_byte_offset == 1) ? ip_rd_data[15:8] :
+                                                       (latched_byte_offset == 2) ? ip_rd_data[23:16] : ip_rd_data[31:24];
                         endcase
+                        // NOTE: active_req_source is cleared in the Request Block to avoid Multi-Driver!
+
                         ip_state <= IP_IDLE;
                     end else if (ip_is_write && ip_wait_count >= 8'd15) begin
                         // Write completed after minimum 15 cycles (more conservative)
@@ -612,12 +625,17 @@ module top (
     reg [7:0] trigger_counter;
     reg [11:0] diag_exit_timer;
     
+    // V52: Dedicated Diagnostic Latches
+    reg [7:0] latch_p2;
+    reg [7:0] latch_p3;
+    reg [31:0] latch_p7;
+    reg [1:0] active_req_source; // 0=None, 1=P2(Diag2), 2=P3(Diag3), 3=P7(Diag6)
+    
     always @(posedge sys_clk) begin
         a_prev <= a_safe;
         rw_prev <= rw_safe;
         
         // Reset read-done flags when definitely OUT of diagnostic regions for a while
-        // Prevents the "rotating" artifacts caused by inter-line address jumps
         if (!in_any_diag) begin
             if (diag_exit_timer < 12'hFFF) diag_exit_timer <= diag_exit_timer + 1;
             else begin
@@ -634,22 +652,39 @@ module top (
             diag_exit_timer <= 0;
         end
         
+        // [FIX 1] Clear Source in the SAME BLOCK to avoid Multi-Driver error
+        if (ip_rd_data_valid) active_req_source <= 0;
+        
         if (!sd_reset) begin
              // READ REQUEST (Trigger on Address or RW change, OR diag peak)
              if ((game_loaded && is_rom && rw_safe && !psram_busy && ((a_safe != a_prev) || (rw_safe != rw_prev))) || 
                  (diag_read_trigger && !psram_busy)) begin
                    psram_rd_req <= 1;
                    
-                   // Mark diagnostic region as read
+                   // Mark diagnostic region as read & Set Source
                    if (diag_read_trigger) begin
                        trigger_counter <= trigger_counter + 1;
                        if (is_psram_diag0) diag0_read_done <= 1;
                        if (is_psram_diag1) diag1_read_done <= 1;
-                       if (is_psram_diag2) diag2_read_done <= 1;
-                       if (is_psram_diag3) diag3_read_done <= 1;
+                       
+                       if (is_psram_diag2) begin
+                           diag2_read_done <= 1;
+                           active_req_source <= 2'd1; // P2 Request
+                       end
+                       
+                       if (is_psram_diag3) begin
+                           diag3_read_done <= 1;
+                           active_req_source <= 2'd2; // P3 Request
+                       end
+                       
                        if (is_psram_diag4) diag4_read_done <= 1;
                        if (is_psram_diag5) diag5_read_done <= 1;
-                       if (is_psram_diag6) diag6_read_done <= 1;
+                       
+                       if (is_psram_diag6) begin // P7 maps here
+                           diag6_read_done <= 1;
+                           active_req_source <= 2'd3; // P7 Request
+                       end
+                       
                        if (is_psram_diag7) diag7_read_done <= 1;
                    end
              end
