@@ -777,7 +777,8 @@ module top (
               armed <= 0;
              
              current_sector <= 0;
-              psram_load_addr <= 23'h7FFFFF; // V51r: Start at -1
+             // V51x: Offset by -129 (Header 128 + Pipeline 1) to land at 0x000000
+             psram_load_addr <= 23'h7FFF7F; 
              sd_byte_available_d <= 0;
              pattern_buf <= 0;
              checksum <= 0;
