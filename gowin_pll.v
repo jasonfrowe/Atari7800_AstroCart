@@ -14,11 +14,11 @@ module gowin_pll (
         .DYN_SDIV_SEL(2),
         .CLKFB_SEL("internal"),
         .CLKOUT_BYPASS("false"),
-        .CLKOUTP_BYPASS("true"),  // Not using phase-shifted clock
+        .CLKOUTP_BYPASS("false"),  // Using phase-shifted clock for PSRAM
         .CLKOUTD_BYPASS("true"),
         .DYN_DA_EN("false"),
         .DUTYDA_SEL("1000"),
-        .PSDA_SEL("0000"),
+        .PSDA_SEL("0100"),         // 90-degree phase shift
         .CLKOUT_FT_DIR(1'b1),
         .CLKOUTP_FT_DIR(1'b1),
         .CLKOUT_DLY_STEP(0),

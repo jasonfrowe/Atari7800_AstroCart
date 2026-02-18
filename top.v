@@ -61,6 +61,11 @@ module top (
 
     wire [15:0] rom_index = a_safe - 16'h4000;
     
+    // PSRAM / System status
+    wire clk_81m;
+    wire clk_81m_shifted;
+    wire pll_lock;
+    
     // Handover Registers
     reg busy;
     reg armed;
@@ -163,7 +168,7 @@ module top (
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h30; // '0'
                             4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= (ip_init_calib ? 8'h49 : 8'h2D); // 'I' or '-'
+                            4'h3: data_out <= (init_calib_synced ? 8'h49 : 8'h2D); // 'I' or '-'
                             4'h4: data_out <= (ip_state == IP_WAIT_INIT) ? 8'h57 :  // 'W'
                                               (ip_state == IP_IDLE) ? 8'h49 :        // 'I'
                                               (ip_state == IP_ACTIVE) ? 8'h41 : 8'h3F; // 'A' or '?'
@@ -175,30 +180,33 @@ module top (
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h31; // '1'
                             4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(ip_wait_count[3:0]); // Wait counter
-                            4'h4: data_out <= rd_valid_sync_pulse ? 8'h56 :      // 'V' if pulse detected
-                                              rd_valid_sync[1] ? 8'h48 :         // 'H' if high
-                                              8'h2D;                              // '-' if low
+                            4'h3: data_out <= to_hex_ascii(ip_wait_count[7:4]); // High nibble (Timeout detection)
+                            4'h4: data_out <= to_hex_ascii(ip_wait_count[3:0]); // Low nibble
+                            4'h5: data_out <= (psram_busy ? 8'h42 : 8'h2D);       // 'B' if busy
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    4'h6: begin // $x460: P2:XX
+                    4'h6: begin // $x460: P2:XX (Addr 0)
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h32; // '2'
                             4'h2: data_out <= 8'h3A; // ':'
                             4'h3: data_out <= to_hex_ascii(psram_read_latch[7:4]);
                             4'h4: data_out <= to_hex_ascii(psram_read_latch[3:0]);
+                            4'h5: data_out <= 8'h41; // 'A'
+                            4'h6: data_out <= 8'h30; // '0'
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    4'h7: begin // $x470: P3:XX
+                    4'h7: begin // $x470: P3:XX (Addr 1)
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h33; // '3'
                             4'h2: data_out <= 8'h3A; // ':'
                             4'h3: data_out <= to_hex_ascii(psram_read_latch[7:4]);
                             4'h4: data_out <= to_hex_ascii(psram_read_latch[3:0]);
+                            4'h5: data_out <= 8'h41; // 'A'
+                            4'h6: data_out <= 8'h31; // '1'
                             default: data_out <= 8'h20;
                         endcase
                     end
@@ -216,13 +224,14 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    4'h9: begin // $x490: P5:XX (IP raw valid + init)
+                    4'h9: begin // $x490: P5:XX (IP raw valid + init + busy)
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h35; // '5'
                             4'h2: data_out <= 8'h3A; // ':'
                             4'h3: data_out <= (ip_rd_data_valid ? 8'h52 : 8'h2D); // 'R' if raw valid, '-' if not
                             4'h4: data_out <= (ip_init_calib ? 8'h49 : 8'h2D);    // 'I' if init, '-' if not
+                            4'h5: data_out <= (psram_busy ? 8'h42 : 8'h2D);       // 'B' if busy
                             default: data_out <= 8'h20;
                         endcase
                     end
@@ -236,13 +245,19 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    4'hB: begin // $x4B0: P7:XX (cmd_en + psram_cmd_valid)
+                    4'hB: begin // $x4B0: P7:XX (32-bit Raw Peek)
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h37; // '7'
                             4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= (ip_cmd_en ? 8'h45 : 8'h2D);        // 'E' if cmd_en, '-' if not
-                            4'h4: data_out <= (psram_cmd_valid ? 8'h56 : 8'h2D);  // 'V' if valid, '-' if not
+                            4'h3: data_out <= to_hex_ascii(ip_rd_data[31:28]);
+                            4'h4: data_out <= to_hex_ascii(ip_rd_data[27:24]);
+                            4'h5: data_out <= to_hex_ascii(ip_rd_data[23:20]);
+                            4'h6: data_out <= to_hex_ascii(ip_rd_data[19:16]);
+                            4'h7: data_out <= to_hex_ascii(ip_rd_data[15:12]);
+                            4'h8: data_out <= to_hex_ascii(ip_rd_data[11:8]);
+                            4'h9: data_out <= to_hex_ascii(ip_rd_data[7:4]);
+                            4'hA: data_out <= to_hex_ascii(ip_rd_data[3:0]);
                             default: data_out <= 8'h20;
                         endcase
                     end
@@ -332,8 +347,6 @@ module top (
     // 7. PSRAM CONTROLLER (Gowin IP)
     // ========================================================================
     
-    wire pll_lock;
-    
     gowin_pll pll_inst (
         .clkin(sys_clk),
         .clkout(clk_81m),
@@ -420,8 +433,23 @@ module top (
     // Address: divide by 4 for 32-bit words, use addr[1:0] for byte select
     assign ip_addr = psram_cmd_addr[21:2];
     
-    // Write: replicate byte across all 4 bytes
+    // Write: replicate byte across all 4 bytes, using mask to protect neighbors
     assign ip_wr_data = {4{psram_din_mux}};
+    // [FIX 2] Dynamic Data Masking
+    // Gowin PSRAM Mask: 1=Mask (Don't Write), 0=Write
+    // We only want to write the specific byte indicated by psram_cmd_addr[1:0]
+    reg [3:0] ip_data_mask_dyn;
+    always @(*) begin
+        case (psram_cmd_addr[1:0])
+            2'b00: ip_data_mask_dyn = 4'b1110; // Write Byte 0 (LSB)
+            2'b01: ip_data_mask_dyn = 4'b1101; // Write Byte 1
+            2'b10: ip_data_mask_dyn = 4'b1011; // Write Byte 2
+            2'b11: ip_data_mask_dyn = 4'b0111; // Write Byte 3 (MSB)
+        endcase
+    end
+    
+    // Assign the dynamic mask
+    wire [3:0] ip_data_mask = ip_data_mask_dyn; 
     
     // Read: extract byte based on address[1:0]
     reg [7:0] extracted_byte;
@@ -435,14 +463,17 @@ module top (
     end
     
     // State machine for IP control
+    // State machine for IP control
     localparam IP_WAIT_INIT = 2'd0;
     localparam IP_IDLE = 2'd1;
-    localparam IP_ACTIVE = 2'd2;
+    localparam IP_SETUP = 2'd2;
+    localparam IP_ACTIVE = 2'd3;
     
     reg [1:0] ip_state;
     reg [7:0] ip_data_buffer;
     reg [7:0] ip_wait_count;  // Extended to 8-bit for longer timeout
-    reg       ip_is_write;     // Remember if current operation is write
+    reg       ip_is_write;    // Remember if current operation is write
+    reg [1:0] latched_byte_offset; // V51v: Latch byte offset
     
     assign psram_dout = ip_data_buffer;
     assign psram_data_ready = (ip_state == IP_IDLE) && init_calib_synced;
@@ -465,27 +496,37 @@ module top (
                 
                 IP_IDLE: begin
                     if (psram_cmd_valid && init_calib_synced) begin
-                        ip_cmd_en <= 1'b1;
+                        // V51u: Move to SETUP state first to let addr/data stabilize
                         ip_wait_count <= 8'h0;
-                        ip_is_write <= psram_cmd_write;  // Remember command type
-                        ip_state <= IP_ACTIVE;
+                        ip_is_write <= psram_cmd_write;
+                        ip_state <= IP_SETUP;
                     end else begin
                         ip_cmd_en <= 1'b0;
                     end
                 end
                 
+                IP_SETUP: begin
+                    // V51v: Latch byte offset for stable capture
+                    latched_byte_offset <= psram_cmd_addr[1:0];
+                    // V51u: One cycle setup, then assert cmd_en
+                    ip_cmd_en <= 1'b1;
+                    ip_state <= IP_ACTIVE;
+                end
+                
                 IP_ACTIVE: begin
-                    // Hold cmd_en high for 3 cycles to ensure IP sees it
-                    if (ip_wait_count < 8'd3) begin
-                        ip_cmd_en <= 1'b1;
-                    end else begin
-                        ip_cmd_en <= 1'b0;
-                    end
+                    // V51v: Extend cmd_en to 2 cycles? No, keep 1 cycle pulse but use latched offset
+                    ip_cmd_en <= 1'b0;
                     ip_wait_count <= ip_wait_count + 1'b1;
                     
-                    if (rd_valid_sync_pulse) begin
-                        // Read completed - synchronized edge detect
-                        ip_data_buffer <= extracted_byte;
+                    if (ip_rd_data_valid) begin
+                        // Read completed - caputure immediately from IP output
+                        // V51v: Use latched offset to select byte
+                        case (latched_byte_offset)
+                            2'd0: ip_data_buffer <= ip_rd_data[7:0];
+                            2'd1: ip_data_buffer <= ip_rd_data[15:8];
+                            2'd2: ip_data_buffer <= ip_rd_data[23:16];
+                            2'd3: ip_data_buffer <= ip_rd_data[31:24];
+                        endcase
                         ip_state <= IP_IDLE;
                     end else if (ip_is_write && ip_wait_count >= 8'd15) begin
                         // Write completed after minimum 15 cycles (more conservative)
@@ -512,11 +553,13 @@ module top (
         .pll_lock(pll_lock),        // PLL lock signal
         .rst_n(pll_lock),           // Active-high reset
         
-        .cmd(psram_cmd_write),      // 0=read, 1=write
+        // [FIX 1] Use ip_is_write (latched) instead of psram_cmd_write (transient)
+        // psram_cmd_write drops to 0 before cmd_en goes high!
+        .cmd(ip_is_write),      // 0=read, 1=write
         .cmd_en(ip_cmd_en),
         .addr(ip_addr),
         .wr_data(ip_wr_data),
-        .data_mask(4'b0000),        // Enable all bytes
+        .data_mask(ip_data_mask),    // Use byte mask to prevent neighbor overwrites
         .rd_data(ip_rd_data),
         .rd_data_valid(ip_rd_data_valid),
         .init_calib(ip_init_calib),
@@ -567,26 +610,34 @@ module top (
                              (is_psram_diag7 && !diag7_read_done));
     
     reg [7:0] trigger_counter;
+    reg [11:0] diag_exit_timer;
     
     always @(posedge sys_clk) begin
         a_prev <= a_safe;
         rw_prev <= rw_safe;
         
-        // Reset read-done flags when leaving diagnostic regions
+        // Reset read-done flags when definitely OUT of diagnostic regions for a while
+        // Prevents the "rotating" artifacts caused by inter-line address jumps
         if (!in_any_diag) begin
-            diag0_read_done <= 0;
-            diag1_read_done <= 0;
-            diag2_read_done <= 0;
-            diag3_read_done <= 0;
-            diag4_read_done <= 0;
-            diag5_read_done <= 0;
-            diag6_read_done <= 0;
-            diag7_read_done <= 0;
+            if (diag_exit_timer < 12'hFFF) diag_exit_timer <= diag_exit_timer + 1;
+            else begin
+                diag0_read_done <= 0;
+                diag1_read_done <= 0;
+                diag2_read_done <= 0;
+                diag3_read_done <= 0;
+                diag4_read_done <= 0;
+                diag5_read_done <= 0;
+                diag6_read_done <= 0;
+                diag7_read_done <= 0;
+            end
+        end else begin
+            diag_exit_timer <= 0;
         end
         
         if (!sd_reset) begin
              // READ REQUEST (Trigger on Address or RW change, OR diag peak)
-             if ((game_loaded && is_rom && rw_safe && ((a_safe != a_prev) || (rw_safe != rw_prev))) || diag_read_trigger) begin
+             if ((game_loaded && is_rom && rw_safe && !psram_busy && ((a_safe != a_prev) || (rw_safe != rw_prev))) || 
+                 (diag_read_trigger && !psram_busy)) begin
                    psram_rd_req <= 1;
                    
                    // Mark diagnostic region as read
@@ -602,8 +653,8 @@ module top (
                        if (is_psram_diag7) diag7_read_done <= 1;
                    end
              end
-             else if (psram_busy) begin 
-                   // Acknowledged by 54MHz PSRAM domain
+             else if (ip_state == IP_ACTIVE) begin 
+                   // Safely clear request once acknowledged by the state machine
                    psram_rd_req <= 0; 
              end
              else if (!game_loaded && !in_any_diag) psram_rd_req <= 0; // Menu Mode safety (but allow diagnostics)
@@ -726,7 +777,7 @@ module top (
               armed <= 0;
              
              current_sector <= 0;
-              psram_load_addr <= 0; // V51e: Start at 0
+              psram_load_addr <= 23'h7FFFFF; // V51r: Start at -1
              sd_byte_available_d <= 0;
              pattern_buf <= 0;
              checksum <= 0;
@@ -737,7 +788,7 @@ module top (
               // --- INDEPENDENT PSRAM WRITE HANDSHAKE (V51c: Sequential) ---
               if (psram_wr_req) begin
                    psram_wr_req <= 0;
-                   psram_load_addr <= psram_load_addr + 1; // Increment ONLY after pulsed
+                   // V51r: Increment moved to SD_DATA to avoid race
               end else if (write_pending && !psram_busy) begin
                    psram_wr_req <= 1;
                    write_pending <= 0;
@@ -791,6 +842,7 @@ module top (
                          end
                          
                          byte_index <= byte_index + 1;
+                         psram_load_addr <= psram_load_addr + 1; // V51r: Increment here
                          sd_state <= SD_WAIT;
                   end
                  
