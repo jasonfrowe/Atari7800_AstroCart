@@ -241,16 +241,18 @@ module sd_controller(
                 READ_BLOCK_DATA: begin
                     dout <= recv_data;
                     byte_available <= 1;
-                    if (byte_counter == 0) begin
-                        bit_counter <= 7;
-                        return_state <= READ_BLOCK_CRC;
-                        state <= RECEIVE_BYTE;
-                    end
-                    else begin
-                        byte_counter <= byte_counter - 1;
-                        return_state <= READ_BLOCK_DATA;
-                        bit_counter <= 7;
-                        state <= RECEIVE_BYTE;
+                    if (rd) begin // Flow Control: Only proceed if Host is ready
+                        if (byte_counter == 0) begin
+                            bit_counter <= 7;
+                            return_state <= READ_BLOCK_CRC;
+                            state <= RECEIVE_BYTE;
+                        end
+                        else begin
+                            byte_counter <= byte_counter - 1;
+                            return_state <= READ_BLOCK_DATA;
+                            bit_counter <= 7;
+                            state <= RECEIVE_BYTE;
+                        end
                     end
                 end
                 READ_BLOCK_CRC: begin
