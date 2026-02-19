@@ -700,21 +700,17 @@ module top (
         a_prev <= a_safe;
         rw_prev <= rw_safe;
         
-        // Reset read-done flags when definitely OUT of diagnostic regions for a while
-        if (!in_any_diag) begin
-            if (diag_exit_timer < 12'hFFF) diag_exit_timer <= diag_exit_timer + 1;
-            else begin
-                diag0_read_done <= 0;
-                diag1_read_done <= 0;
-                diag2_read_done <= 0;
-                diag3_read_done <= 0;
-                diag4_read_done <= 0;
-                diag5_read_done <= 0;
-                // diag6_read_done <= 0; // Handled by one-shot flag
-                diag7_read_done <= 0;
-            end
-        end else begin
-            diag_exit_timer <= 0;
+        // Reset diagnostic read-done flags ONLY on System Reset or new SD Load
+        if (sd_reset || (sd_state == 4'd1 && current_sector == 0)) begin // 4'd1 = SD_START
+            diag0_read_done <= 0;
+            diag1_read_done <= 0;
+            diag2_read_done <= 0;
+            diag3_read_done <= 0;
+            diag4_read_done <= 0;
+            diag5_read_done <= 0;
+            diag6_read_done <= 0;
+            diag7_read_done <= 0;
+            p7_one_shot_fired <= 0;
         end
         
         // [FIX 1] Clear Source in the SAME BLOCK to avoid Multi-Driver error
