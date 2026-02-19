@@ -666,6 +666,7 @@ module top (
     reg diag5_read_done;
     reg diag6_read_done;
     reg diag7_read_done;
+    reg p7_one_shot_fired; // Added for persistent capture
     
     // Detect when we're in any diagnostic region
     wire in_any_diag = is_psram_diag0 || is_psram_diag1 || is_psram_diag2 || is_psram_diag3 ||
@@ -679,7 +680,7 @@ module top (
                              (is_psram_diag3 && !diag3_read_done) ||
                              (is_psram_diag4 && !diag4_read_done) ||
                              (is_psram_diag5 && !diag5_read_done) ||
-                             (is_psram_diag6 && !diag6_read_done) ||
+                             (is_psram_diag6 && !p7_one_shot_fired) || // Use persistent one-shot flag
                              (is_psram_diag7 && !diag7_read_done));
     
     reg [7:0] trigger_counter;
@@ -709,7 +710,7 @@ module top (
                 diag3_read_done <= 0;
                 diag4_read_done <= 0;
                 diag5_read_done <= 0;
-                diag6_read_done <= 0;
+                // diag6_read_done <= 0; // Handled by one-shot flag
                 diag7_read_done <= 0;
             end
         end else begin
@@ -750,10 +751,10 @@ module top (
                            diag5_read_done <= 1;
                            active_req_source <= 3'd5; // P5 Request
                        end
-                       
-                       if (is_psram_diag6) begin // P7 maps here
+                       if (is_psram_diag6 && !p7_one_shot_fired) begin 
                            diag6_read_done <= 1;
-                           active_req_source <= 3'd3; // P7 Request (Legacy)
+                           p7_one_shot_fired <= 1; // Mark as fired permanently until reset
+                           active_req_source <= 3'd3; 
                        end
                        
                        if (is_psram_diag7) diag7_read_done <= 1;
@@ -764,6 +765,8 @@ module top (
                    psram_rd_req <= 0; 
              end
              else if (!game_loaded && !in_any_diag) psram_rd_req <= 0; // Menu Mode safety (but allow diagnostics)
+        end else begin
+             p7_one_shot_fired <= 0;
         end
     end
 
