@@ -83,11 +83,7 @@ module top (
 
     // ROM Fetch / PSRAM Read / Status Read
     always @(posedge sys_clk) begin
-        if (!game_loaded && a_safe == 16'h0458 && rw_safe) begin
-             // Status Read (POKEY Base + 8)
-             data_out <= status_byte;
-        end
-        else if (game_loaded) begin
+        if (game_loaded) begin
              data_out <= psram_read_latch; 
         end else begin
             // --- DIAGNOSTIC ROM OVERRIDE ---
@@ -289,9 +285,9 @@ module top (
     // Drive Enable (Read from ROM)
     wire should_drive = is_rom && rw_safe && (cpu_active || dma_active);
 
-    // Write Enable (Write to POKEY)
-    // STRICT RULE: Only write when PHI2 is High (Data is valid).
-    wire pokey_we = is_pokey && !rw_safe && phi2_safe;
+    // Write Enables
+    wire pokey_we   = is_pokey && !rw_safe && phi2_safe;
+    wire trigger_we = is_2200  && !rw_safe && phi2_safe;
 
     // ========================================================================
     // 4. OUTPUTS
@@ -302,10 +298,10 @@ module top (
         buf_dir <= rw_safe; 
 
         // Output Enable (Active Low)
-        // Enable if Driving ROM OR if Atari is Writing (to us)
+        // Enable if Driving Bus (Read) OR if Atari is Writing (to us)
         // We must enable the buffer to receive the write data!
         // Decoupled from PLL: Bus Logic must run always!
-        if (should_drive || pokey_we) begin
+        if (should_drive || pokey_we || trigger_we) begin
             buf_oe <= 1'b0; 
         end else begin
             buf_oe <= 1'b1; 
