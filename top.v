@@ -89,9 +89,9 @@ module top (
     // ROM Fetch / PSRAM Read / Status Read
     always @(posedge sys_clk) begin
         if (game_loaded) begin
-             // [OPTIMIZATION] Fast Data Capture: Bypass synced latch
-             // Use ip_data_buffer directly (updates ~3 cycles earlier)
-             data_out <= ip_data_buffer; 
+             // [OPTIMIZATION] Fast Data Capture: Bypass synced latch entirely
+             // Data connects directly combinationally to the FPGA pins from ip_data_buffer
+             // data_out <= ip_data_buffer; 
         end else begin
             // --- DIAGNOSTIC ROM OVERRIDE ---
             // Use $7F00-$7FBF range (all zeros in menu.bin - safe)
@@ -325,17 +325,17 @@ module top (
     end
 
 
-    // FPGA Tristate
-    assign d = (should_drive) ? data_out : 8'bz;
+    // FPGA Tristate (Bypass data_out sync for game data to save 1 sys_clk latency)
+    assign d = (should_drive) ? (game_loaded ? ip_data_buffer : data_out) : 8'bz;
 
     // ========================================================================
     // 5. POKEY AUDIO INSTANCE
     // ========================================================================
     
-    // Clock Divider (40.5MHz -> 1.79MHz)
-    // 40.5 / 1.79 ~= 22.62. Use 23.
-    reg [4:0] clk_div;
-    wire tick_179 = (clk_div == 22);
+    // Clock Divider (67.5MHz -> 1.79MHz)
+    // 67.5 / 1.79 ~= 37.7. Use 38.
+    reg [5:0] clk_div;
+    wire tick_179 = (clk_div == 37);
     
     always @(posedge sys_clk) begin
         if (tick_179) clk_div <= 0;
@@ -1095,7 +1095,7 @@ module top (
     reg atari_active;
     reg [22:0] activity_timer;
     
-    localparam ACTIVITY_TIMEOUT = 23'h180000; // ~50ms at 40.5MHz
+    localparam ACTIVITY_TIMEOUT = 23'h330000; // ~50ms at 67.5MHz
     
     always @(posedge sys_clk) begin
         phi2_prev <= phi2_safe;
@@ -1120,7 +1120,7 @@ module top (
     
     reg [24:0] heartbeat;
 
-    localparam BLINK_DUR = 23'h300000; // ~75ms at 40.5MHz
+    localparam BLINK_DUR = 23'h4D0000; // ~75ms at 67.5MHz
 
     always @(posedge sys_clk) begin
         heartbeat <= heartbeat + 1;

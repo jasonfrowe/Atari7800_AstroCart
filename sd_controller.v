@@ -76,19 +76,19 @@ module sd_controller(
     reg [9:0] byte_counter;
     reg [9:0] bit_counter;
     
-    reg [26:0] boot_counter = 27'd075_000;
+    reg [26:0] boot_counter = 27'd065_000;
     reg [7:0] reset_counter = 0;
     
     // CLOCK GENERATION
-    // SysClk = 40.5MHz (from Gowin PLL)
+    // SysClk = 67.5MHz (from Gowin PLL)
     
     // Slow Clock Target: < 400kHz
-    // 40.5MHz / 128 = 316kHz. (Bit 7)
-    reg [6:0] slow_div; 
+    // 67.5MHz / 256 = 263kHz. (Bit 8)
+    reg [7:0] slow_div; 
     
     // Fast Clock Target: ~5MHz (Safer for breadboard)
-    // 40.5MHz / 8 = 5.06MHz. (Bit 3)
-    reg [2:0] fast_div;       
+    // 67.5MHz / 16 = 4.22MHz. (Bit 4)
+    reg [3:0] fast_div;       
     
     reg high_speed_mode;
     
@@ -116,7 +116,7 @@ module sd_controller(
         if(reset == 1) begin
             state <= RST;
             sclk_sig <= 0;
-            boot_counter <= 27'd007_500;
+            boot_counter <= 27'd065_000;
             cmd_mode <= 1;
             cs <= 1;
             cmd_out <= {56{1'b1}};
@@ -150,7 +150,7 @@ module sd_controller(
                         state <= INIT;
                     end
                     else begin
-                        // Startup Wait (at 316kHz, 75k ticks = 0.25s)
+                        // Startup Wait (at ~260kHz, 65k ticks = 0.25s)
                         boot_counter <= boot_counter - 1;
                         // if (boot_counter[2]) sclk_sig <= ~sclk_sig; // Don't toggle yet, just wait?
                         sclk_sig <= 1; // Keep clock High during IDLE/Wait
@@ -221,7 +221,7 @@ module sd_controller(
                     cmd_out <= {16'hFF_51, address, 8'hFF};
                     bit_counter <= 55;
                     response_type <= 3'b1;
-                    boot_counter <= 75_000; // Timeout ~15ms at 5MHz
+                    boot_counter <= 65_000; // Timeout ~15ms at 4.2MHz
                     return_state <= READ_BLOCK_WAIT;
                     state <= SEND_CMD;
                 end

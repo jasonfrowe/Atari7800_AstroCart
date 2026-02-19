@@ -10,9 +10,9 @@ module gowin_pll (
         .FCLKIN("27"),
         .DEVICE("GW1NR-9C"),
         .IDIV_SEL(0),       // Input divider: 27/(0+1) = 27MHz
-        .FBDIV_SEL(2),      // Feedback: 27*3 = 81MHz
-        .ODIV_SEL(8),       // VCO = 81 * 8 = 648MHz
-        .DYN_SDIV_SEL(2),   // 81 / 2 = 40.5MHz
+        .FBDIV_SEL(4),      // Feedback: 27*5 = 135MHz
+        .ODIV_SEL(4),       // VCO = 135 * 4 = 540MHz
+        .DYN_SDIV_SEL(2),   // 135 / 2 = 67.5MHz
         .CLKFB_SEL("internal"),
         .CLKOUT_BYPASS("false"),
         .CLKOUTP_BYPASS("false"),  
