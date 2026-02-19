@@ -422,6 +422,10 @@ module top (
     
     // Write Buffer for Reliable Data Transfer
     // V66: 128-bit Accumulator (16 Bytes)
+    
+    // --- PSRAM Read Blinker Declarations ---
+    reg state_read;
+    reg [22:0] timer_read;
     reg [31:0] acc_word0;
     reg [31:0] acc_word1;
     reg [31:0] acc_word2;
@@ -1189,6 +1193,23 @@ module top (
         end
     end
 
+    // --- PSRAM Read Blinker Logic ---
+    // Blink when Data is Valid (Read Complete)
+    always @(posedge sys_clk) begin
+        if (state_read) begin
+             if (timer_read == 0) begin
+                 state_read <= 0;
+                 timer_read <= BLINK_DUR;
+             end else timer_read <= timer_read - 1;
+        end else begin
+             if (timer_read > 0) timer_read <= timer_read - 1;
+             else if (ip_rd_data_valid) begin // Trigger on Read Data Valid
+                 state_read <= 1;
+                 timer_read <= BLINK_DUR;
+             end
+        end
+    end
+
 
     // LED Assignments (Full Loader Mode)
     // Active LOW LEDs. 
@@ -1198,6 +1219,6 @@ module top (
     assign led[3] = !state_dir;      // ON when Driving Bus (Output Mode)
 
     assign led[4] = write_pending;  // ON when Write active
-    assign led[5] = !state_2200;          // ON when busy
+    assign led[5] = !state_read;    // ON when Reading (Active Low)
     
 endmodule
