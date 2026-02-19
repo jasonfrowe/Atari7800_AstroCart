@@ -1,7 +1,8 @@
 module gowin_pll (
-    input  clkin,
-    output clkout,  // 54MHz for PSRAM IP
-    output clkoutp, // Not used with Gowin IP
+    input clkin,
+    output clkout,
+    output clkoutp,
+    output clkoutd,
     output lock
 );
 
@@ -9,16 +10,16 @@ module gowin_pll (
         .FCLKIN("27"),
         .DEVICE("GW1NR-9C"),
         .IDIV_SEL(0),       // Input divider: 27/(0+1) = 27MHz
-        .FBDIV_SEL(1),      // Feedback: 27*2 = 54MHz
-        .ODIV_SEL(8),       // Output divider: gives 54MHz
-        .DYN_SDIV_SEL(2),
+        .FBDIV_SEL(2),      // Feedback: 27*3 = 81MHz
+        .ODIV_SEL(8),       // VCO = 81 * 8 = 648MHz
+        .DYN_SDIV_SEL(2),   // 81 / 2 = 40.5MHz
         .CLKFB_SEL("internal"),
         .CLKOUT_BYPASS("false"),
-        .CLKOUTP_BYPASS("false"),  // Using phase-shifted clock for PSRAM
-        .CLKOUTD_BYPASS("true"),
+        .CLKOUTP_BYPASS("false"),  
+        .CLKOUTD_BYPASS("false"),  // ENABLE CLKOUTD
         .DYN_DA_EN("false"),
         .DUTYDA_SEL("1000"),
-        .PSDA_SEL("0100"),         // 90-degree phase shift
+        .PSDA_SEL("0100"),         
         .CLKOUT_FT_DIR(1'b1),
         .CLKOUTP_FT_DIR(1'b1),
         .CLKOUT_DLY_STEP(0),
@@ -29,6 +30,8 @@ module gowin_pll (
         .CLKIN(clkin),
         .CLKOUT(clkout),
         .CLKOUTP(clkoutp),
+        .CLKOUTD(clkoutd),
+        .CLKOUTD3(),
         .LOCK(lock),
         .RESET(1'b0),
         .RESET_P(1'b0),

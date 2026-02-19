@@ -28,13 +28,18 @@ module top (
     inout [0:0]       IO_psram_rwds,   // RWDS
     
     output       audio,     // Audio PWM
-    output [5:0] led       // Debug LEDs
+    output [5:0] led,       // Debug LEDs
+    
+    // High-speed debug pins
+    output       debug_pin1,
+    output       debug_pin2
 );
 
     // ========================================================================
-    // 0. CLOCK GENERATION (27MHz native for Atari, 60MHz PLL for PSRAM)
+    // 0. CLOCK GENERATION (27MHz native for Atari, 81MHz PSRAM, 40.5MHz Sys)
     // ========================================================================
-    wire sys_clk = clk;     // 27MHz native
+    wire sys_clk; // 40.5MHz native from PLL
+    wire external_clk = clk;
 
     // ========================================================================
     // 1. INPUT SYNCHRONIZATION
@@ -177,14 +182,14 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    4'h5: begin // $x450: P1:XX (Wait counter + sync status)
+                    4'h5: begin // $x450: P1:XX (Max Wait Counter / Timeout flag)
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h31; // '1'
                             4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(ip_wait_count[7:4]); // High nibble (Timeout detection)
-                            4'h4: data_out <= to_hex_ascii(ip_wait_count[3:0]); // Low nibble
-                            4'h5: data_out <= (psram_busy ? 8'h42 : 8'h2D);       // 'B' if busy
+                            4'h3: data_out <= to_hex_ascii(latch_max_wait[7:4]); // High nibble
+                            4'h4: data_out <= to_hex_ascii(latch_max_wait[3:0]); // Low nibble
+                            4'h5: data_out <= (ip_state == 2'd3 ? 8'h41 : 8'h20); // 'A' if stuck in ACTIVE
                             default: data_out <= 8'h20;
                         endcase
                     end
@@ -327,10 +332,10 @@ module top (
     // 5. POKEY AUDIO INSTANCE
     // ========================================================================
     
-    // Clock Divider (27MHz -> 1.79MHz)
-    // 27 / 1.79 ~= 15.08. Use 15.
-    reg [3:0] clk_div;
-    wire tick_179 = (clk_div == 14);
+    // Clock Divider (40.5MHz -> 1.79MHz)
+    // 40.5 / 1.79 ~= 22.62. Use 23.
+    reg [4:0] clk_div;
+    wire tick_179 = (clk_div == 22);
     
     always @(posedge sys_clk) begin
         if (tick_179) clk_div <= 0;
@@ -360,9 +365,10 @@ module top (
     // ========================================================================
     
     gowin_pll pll_inst (
-        .clkin(sys_clk),
+        .clkin(external_clk),
         .clkout(clk_81m),
         .clkoutp(clk_81m_shifted),
+        .clkoutd(sys_clk),
         .lock(pll_lock)
     );
     
@@ -506,6 +512,8 @@ module top (
     assign psram_data_ready = (ip_state == IP_IDLE) && init_calib_synced;
     assign psram_busy = !init_calib_synced || (ip_state != IP_IDLE) || ip_cmd_en;
     
+    reg [7:0] latch_max_wait;
+    
     always @(posedge sys_clk or negedge pll_lock) begin
         if (!pll_lock) begin
             ip_state <= IP_WAIT_INIT;
@@ -515,6 +523,7 @@ module top (
             ip_is_write <= 1'b0;
             latched_ip_addr_reg <= 0;
             ip_wr_data_latch <= 0;
+            latch_max_wait <= 0;
         end else begin
             case (ip_state)
                 IP_WAIT_INIT: begin
@@ -586,6 +595,7 @@ module top (
                     // IP_IDLE handles the reset to 0000 for the next transaction.
 
                     ip_wait_count <= ip_wait_count + 1'b1;
+                    if (ip_wait_count > latch_max_wait) latch_max_wait <= ip_wait_count;
                     
                     if (ip_rd_data_valid) begin
                          // READ LOGIC (Unchanged - this part is correct)
@@ -606,10 +616,10 @@ module top (
 
                     end else if (ip_is_write && ip_wait_count >= 8'd15) begin
                         ip_state <= IP_IDLE;
-                    end else if (!ip_is_write && ip_wait_count >= 8'd50) begin
+                    end else if (!ip_is_write && ip_wait_count >= 8'd250) begin // Increased to 250 (max 8-bit)
                         ip_data_buffer <= 8'hEE;
                         ip_state <= IP_IDLE;
-                    end else if (ip_wait_count >= 8'd100) begin
+                    end else if (ip_wait_count >= 8'd255) begin
                         ip_state <= IP_IDLE;
                     end
                 end
@@ -696,6 +706,9 @@ module top (
     reg [31:0] latch_p7;
     reg [2:0] active_req_source; // V71: Extended to 3 bits (support up to 7)
     
+    reg [15:0] last_req_addr;
+    reg last_req_rw;
+    
     always @(posedge sys_clk) begin
         a_prev <= a_safe;
         rw_prev <= rw_safe;
@@ -711,16 +724,24 @@ module top (
             diag6_read_done <= 0;
             diag7_read_done <= 0;
             p7_one_shot_fired <= 0;
+            last_req_addr <= 16'hFFFF; // Force initial mismatch
+            last_req_rw <= 1'b0;
         end
         
         // [FIX 1] Clear Source in the SAME BLOCK to avoid Multi-Driver error
         if (ip_rd_data_valid) active_req_source <= 0;
         
         if (!sd_reset) begin
-             // READ REQUEST (Trigger on Address or RW change, OR diag peak)
-             if ((game_loaded && is_rom && rw_safe && !psram_busy && ((a_safe != a_prev) || (rw_safe != rw_prev))) || 
+             // READ REQUEST (Trigger on Address change, OR diag peak)
+             // CRITICAL FIX: PREFETCH ENABLED
+             // We trigger the read the moment `a_safe` changes, regardless of `phi2` state.
+             // The 6502 asserts the address during PHI1 (or late PHI2 of prev cycle). 
+             // We want the 750ns PSRAM IP to start working IMMEDIATELY.
+             if ((game_loaded && is_rom && !psram_busy && (a_safe != last_req_addr)) || 
                  (diag_read_trigger && !psram_busy)) begin
                    psram_rd_req <= 1;
+                   last_req_addr <= a_safe; // Immediately record that we are requesting this address
+                   last_req_rw <= rw_safe;
                    
                    // Mark diagnostic region as read & Set Source
                    if (diag_read_trigger) begin
@@ -1074,7 +1095,7 @@ module top (
     reg atari_active;
     reg [22:0] activity_timer;
     
-    localparam ACTIVITY_TIMEOUT = 23'h100000; // ~50ms
+    localparam ACTIVITY_TIMEOUT = 23'h180000; // ~50ms at 40.5MHz
     
     always @(posedge sys_clk) begin
         phi2_prev <= phi2_safe;
@@ -1099,7 +1120,7 @@ module top (
     
     reg [24:0] heartbeat;
 
-    localparam BLINK_DUR = 23'h200000; // ~75ms
+    localparam BLINK_DUR = 23'h300000; // ~75ms at 40.5MHz
 
     always @(posedge sys_clk) begin
         heartbeat <= heartbeat + 1;
@@ -1219,5 +1240,10 @@ module top (
 
     assign led[4] = write_pending;  // ON when Write active
     assign led[5] = !state_read;    // ON when Reading (Active Low)
+    
+    // --- Oscilloscope Debug Pins ---
+    // High-speed 1.8V outputs for accurate timing measurement
+    assign debug_pin1 = psram_rd_req;     // Probe 1: Start of Read Request
+    assign debug_pin2 = ip_rd_data_valid; // Probe 2: Data return from PSRAM IP
     
 endmodule
