@@ -637,6 +637,8 @@ module top (
     // Trigger read on Address Change (Prefetch) to gain timing margin.
     reg should_drive_d;
     always @(posedge sys_clk) should_drive_d <= should_drive;
+
+
     
     reg [15:0] a_prev;
     reg rw_prev;
@@ -852,6 +854,10 @@ module top (
     reg [6:0] current_sector;
     
     reg byte_arrived_latched;
+    
+    // [DEBUG] Automatic Switch Timer
+    reg [24:0] auto_switch_timer;
+
 
     always @(posedge sys_clk) begin
         if (sd_reset) begin
@@ -882,7 +888,9 @@ module top (
              pattern_buf <= 0;
              checksum <= 0;
              sd_dout_reg <= 0;
+             sd_dout_reg <= 0;
              byte_arrived_latched <= 0;
+             auto_switch_timer <= 0;
         end else begin
              sd_byte_available_d <= sd_byte_available;
 
@@ -1028,6 +1036,13 @@ module top (
                      // 3. It works even if the FPGA is emulating ROM at that address 
                      //    (because FPGA tristates data bus on Writes).
                      
+                     // [DEBUG] Automatic Timer Switch (1 Second Delay)
+                     if (auto_switch_timer < 25'd27000000) begin
+                         auto_switch_timer <= auto_switch_timer + 1;
+                     end else begin
+                         game_loaded <= 1; // AUTO SWITCH
+                     end
+                     
                      if (a_safe == 16'h2200 && !rw_safe && phi2_safe) begin
                          if (!game_loaded && d == 8'hA5) begin
                              // LOCK: Switch to Game Mode
@@ -1042,6 +1057,7 @@ module top (
                              checksum <= 0;
                              busy <= 1;
                              game_loaded <= 0; // Force unload
+                             auto_switch_timer <= 0; 
                          end
                      end
                  end
@@ -1164,7 +1180,8 @@ module top (
     // Active LOW LEDs. 
     assign led[0] = !pll_lock;      // ON when Locked
     assign led[1] = game_loaded;    // ON when Game Mode
-    assign led[2] = !phi2_safe;     // ON when PHI2 activity
+    // assign led[2] = !phi2_safe;     // ON when PHI2 activity
+    assign led[2] = !state_a15;
     assign led[3] = !sd_ready;      // ON when SD Ready
     assign led[4] = write_pending;  // ON when Write active
     assign led[5] = !state_2200;          // ON when busy
