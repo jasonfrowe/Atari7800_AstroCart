@@ -160,15 +160,18 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    4'h4: begin // $x440: P0:XX (IP State + Init)
+                    4'h4: begin // $x440: Checksum (C:XXXXXXXX) - WAS P0
                         case (a_safe[3:0])
-                            4'h0: data_out <= 8'h50; // 'P'
-                            4'h1: data_out <= 8'h30; // '0'
-                            4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= (init_calib_synced ? 8'h49 : 8'h2D); // 'I' or '-'
-                            4'h4: data_out <= (ip_state == IP_WAIT_INIT) ? 8'h57 :  // 'W'
-                                              (ip_state == IP_IDLE) ? 8'h49 :        // 'I'
-                                              (ip_state == IP_ACTIVE) ? 8'h41 : 8'h3F; // 'A' or '?'
+                            4'h0: data_out <= 8'h43; // 'C'
+                            4'h1: data_out <= 8'h3A; // ':'
+                            4'h2: data_out <= to_hex_ascii(checksum[31:28]);
+                            4'h3: data_out <= to_hex_ascii(checksum[27:24]);
+                            4'h4: data_out <= to_hex_ascii(checksum[23:20]);
+                            4'h5: data_out <= to_hex_ascii(checksum[19:16]); 
+                            4'h6: data_out <= to_hex_ascii(checksum[15:12]);
+                            4'h7: data_out <= to_hex_ascii(checksum[11:8]);
+                            4'h8: data_out <= to_hex_ascii(checksum[7:4]);
+                            4'h9: data_out <= to_hex_ascii(checksum[3:0]);
                             default: data_out <= 8'h20;
                         endcase
                     end
@@ -503,7 +506,6 @@ module top (
                 IP_IDLE: begin
                     if (psram_cmd_valid && init_calib_synced) begin
                         // [FIX 4] LATCH ADDRESS HERE
-                        // V67: Use the DEDICATED write address buffer for writes
                         if (psram_cmd_write) latched_ip_addr_reg <= psram_write_addr_latched; 
                         else latched_ip_addr_reg <= psram_cmd_addr; // Reads use Mux
                         
@@ -512,13 +514,24 @@ module top (
                             ip_wr_data_latch <= acc_word0; // First word
                             
                             // [FIX 6] MASKING SETUP: Enable the FIRST word
-                            // We want to write this 32-bit word, so open the mask (0=Write)
                             ip_data_mask <= 4'b0000;
+                            
+                            ip_wait_count <= 8'h0;
+                            ip_is_write <= 1'b1;
+                            ip_state <= IP_SETUP; // Writers go to SETUP
+                        end else begin
+                            // [OPTIMIZATION] READS SKIP SETUP!
+                            // Issue command immediately
+                            ip_cmd_en <= 1'b1;
+                            
+                            // Latch byte offset immediately for read routing
+                            latched_byte_offset <= psram_cmd_addr[1:0];
+                            
+                            ip_wait_count <= 8'h0;
+                            ip_is_write <= 1'b0;
+                            ip_state <= IP_ACTIVE; // Readers go directly to ACTIVE
                         end
-                        
-                        ip_wait_count <= 8'h0;
-                        ip_is_write <= psram_cmd_write;
-                        ip_state <= IP_SETUP;
+
                     end else begin
                         ip_cmd_en <= 1'b0;
                         // Default mask state (optional, but good safety)
@@ -527,8 +540,7 @@ module top (
                 end
                 
                 IP_SETUP: begin
-                    // V51v: Latch byte offset for stable capture
-                    latched_byte_offset <= latched_ip_addr_reg[1:0];
+                    // ONLY WRITES COME HERE NOW
                     
                     // V51u: One cycle setup, then assert cmd_en
                     ip_cmd_en <= 1'b1;
