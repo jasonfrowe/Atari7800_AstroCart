@@ -298,20 +298,27 @@ module top (
     // 4. OUTPUTS
     // ========================================================================
 
+    // [FIX] Always-Enabled Transceiver Control
+    // User Request: "buf_oe is controlled by FPGA alone. Keep buf_oe low all the time."
+    // Direction (buf_dir) controlled by our drive logic + sticky hold.
     always @(posedge sys_clk) begin
-        // Direction follows RW (1=Out/Read, 0=In/Write)
-        buf_dir <= rw_safe; 
-
-        // Output Enable (Active Low)
-        // Enable if Driving Bus (Read) OR if Atari is Writing (to us)
-        // We must enable the buffer to receive the write data!
-        // Decoupled from PLL: Bus Logic must run always!
-        if (should_drive || pokey_we || trigger_we) begin
-            buf_oe <= 1'b0; 
+        // Direction:
+        // High (1) = Output (FPGA -> Atari) when we should drive.
+        // Low (0)  = Input  (Atari -> FPGA) default.
+        if (should_drive || pokey_we || trigger_we) begin 
+            // pokey_we/trigger_we are WRITES (Atari -> FPGA, Input, DIR=0).
+            // should_drive is READ (FPGA -> Atari, Output, DIR=1).
+            
+            if (should_drive) buf_dir <= 1'b1; // Output
+            else buf_dir <= 1'b0;                // Input
         end else begin
-            buf_oe <= 1'b1; 
+            buf_dir <= 1'b0; // Default to Input
         end
+
+        // Output Enable: ALWAYS ON (Low)
+        buf_oe <= 1'b0; 
     end
+
 
     // FPGA Tristate
     assign d = (should_drive) ? data_out : 8'bz;
@@ -411,7 +418,7 @@ module top (
     //        psram_read_latch <= psram_dout;
     //    end
     // end
-    reg [2:0] psram_busy_sync; // Keep definition if needed elsewhere, or remove if unused.
+    // reg [2:0] psram_busy_sync; // Removed duplicate
     
     // Write Buffer for Reliable Data Transfer
     // V66: 128-bit Accumulator (16 Bytes)
@@ -420,6 +427,11 @@ module top (
     reg [31:0] acc_word2;
     reg [31:0] acc_word3;
     reg [22:0] burst_start_addr; 
+    
+    // --- Direction / Drive Blinker Declarations ---
+    reg state_dir;
+    reg [22:0] timer_dir;
+ 
     
     reg write_pending;
     
@@ -637,8 +649,6 @@ module top (
     // Trigger read on Address Change (Prefetch) to gain timing margin.
     reg should_drive_d;
     always @(posedge sys_clk) should_drive_d <= should_drive;
-
-
     
     reg [15:0] a_prev;
     reg rw_prev;
@@ -854,10 +864,6 @@ module top (
     reg [6:0] current_sector;
     
     reg byte_arrived_latched;
-    
-    // [DEBUG] Automatic Switch Timer
-    reg [24:0] auto_switch_timer;
-
 
     always @(posedge sys_clk) begin
         if (sd_reset) begin
@@ -888,9 +894,7 @@ module top (
              pattern_buf <= 0;
              checksum <= 0;
              sd_dout_reg <= 0;
-             sd_dout_reg <= 0;
              byte_arrived_latched <= 0;
-             auto_switch_timer <= 0;
         end else begin
              sd_byte_available_d <= sd_byte_available;
 
@@ -1036,13 +1040,6 @@ module top (
                      // 3. It works even if the FPGA is emulating ROM at that address 
                      //    (because FPGA tristates data bus on Writes).
                      
-                     // [DEBUG] Automatic Timer Switch (1 Second Delay)
-                     if (auto_switch_timer < 25'd27000000) begin
-                         auto_switch_timer <= auto_switch_timer + 1;
-                     end else begin
-                         game_loaded <= 1; // AUTO SWITCH
-                     end
-                     
                      if (a_safe == 16'h2200 && !rw_safe && phi2_safe) begin
                          if (!game_loaded && d == 8'hA5) begin
                              // LOCK: Switch to Game Mode
@@ -1057,7 +1054,6 @@ module top (
                              checksum <= 0;
                              busy <= 1;
                              game_loaded <= 0; // Force unload
-                             auto_switch_timer <= 0; 
                          end
                      end
                  end
@@ -1175,14 +1171,32 @@ module top (
             end
         end
     end
+    
+    // --- Direction / Drive Blinker Logic ---
+    // Blink when we switch to Output Mode (DIR=1)
+    always @(posedge sys_clk) begin
+        if (state_dir) begin
+             if (timer_dir == 0) begin
+                 state_dir <= 0;
+                 timer_dir <= BLINK_DUR;
+             end else timer_dir <= timer_dir - 1;
+        end else begin
+             if (timer_dir > 0) timer_dir <= timer_dir - 1;
+             else if (buf_dir == 1'b1) begin // Trigger on OUTPUT direction
+                 state_dir <= 1;
+                 timer_dir <= BLINK_DUR;
+             end
+        end
+    end
+
 
     // LED Assignments (Full Loader Mode)
     // Active LOW LEDs. 
     assign led[0] = !pll_lock;      // ON when Locked
     assign led[1] = game_loaded;    // ON when Game Mode
-    // assign led[2] = !phi2_safe;     // ON when PHI2 activity
-    assign led[2] = !state_a15;
-    assign led[3] = !sd_ready;      // ON when SD Ready
+    assign led[2] = !phi2_safe;     // ON when PHI2 activity
+    assign led[3] = !state_dir;      // ON when Driving Bus (Output Mode)
+
     assign led[4] = write_pending;  // ON when Write active
     assign led[5] = !state_2200;          // ON when busy
     
