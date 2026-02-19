@@ -84,7 +84,9 @@ module top (
     // ROM Fetch / PSRAM Read / Status Read
     always @(posedge sys_clk) begin
         if (game_loaded) begin
-             data_out <= psram_read_latch; 
+             // [OPTIMIZATION] Fast Data Capture: Bypass synced latch
+             // Use ip_data_buffer directly (updates ~3 cycles earlier)
+             data_out <= ip_data_buffer; 
         end else begin
             // --- DIAGNOSTIC ROM OVERRIDE ---
             // Use $7F00-$7FBF range (all zeros in menu.bin - safe)
@@ -401,13 +403,15 @@ module top (
     
     reg [7:0] psram_read_latch;
     reg [2:0] psram_busy_sync;
-    always @(posedge sys_clk) begin
-        psram_busy_sync <= {psram_busy_sync[1:0], psram_busy};
-        // Capture on Fall of Busy (Stable Data)
-        if (!psram_busy_sync[1] && psram_busy_sync[2]) begin
-            psram_read_latch <= psram_dout;
-        end
-    end
+    // [OPTIMIZATION] Old Latch Logic - Removed for Low Latency
+    // always @(posedge sys_clk) begin
+    //    psram_busy_sync <= {psram_busy_sync[1:0], psram_busy};
+    //    // Capture on Fall of Busy (Stable Data)
+    //    if (!psram_busy_sync[1] && psram_busy_sync[2]) begin
+    //        psram_read_latch <= psram_dout;
+    //    end
+    // end
+    reg [2:0] psram_busy_sync; // Keep definition if needed elsewhere, or remove if unused.
     
     // Write Buffer for Reliable Data Transfer
     // V66: 128-bit Accumulator (16 Bytes)
