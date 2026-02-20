@@ -182,14 +182,19 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    4'h5: begin // $x450: P1:XX (Max Wait Counter / Timeout flag)
+                    4'h5: begin // $x450: P0:XXXXXXXX (PSRAM Checksum)
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
-                            4'h1: data_out <= 8'h31; // '1'
+                            4'h1: data_out <= 8'h30; // '0'
                             4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(latch_max_wait[7:4]); // High nibble
-                            4'h4: data_out <= to_hex_ascii(latch_max_wait[3:0]); // Low nibble
-                            4'h5: data_out <= (ip_state == 2'd3 ? 8'h41 : 8'h20); // 'A' if stuck in ACTIVE
+                            4'h3: data_out <= to_hex_ascii(psram_checksum[31:28]);
+                            4'h4: data_out <= to_hex_ascii(psram_checksum[27:24]);
+                            4'h5: data_out <= to_hex_ascii(psram_checksum[23:20]);
+                            4'h6: data_out <= to_hex_ascii(psram_checksum[19:16]);
+                            4'h7: data_out <= to_hex_ascii(psram_checksum[15:12]);
+                            4'h8: data_out <= to_hex_ascii(psram_checksum[11:8]);
+                            4'h9: data_out <= to_hex_ascii(psram_checksum[7:4]);
+                            4'hA: data_out <= to_hex_ascii(psram_checksum[3:0]);
                             default: data_out <= 8'h20;
                         endcase
                     end
