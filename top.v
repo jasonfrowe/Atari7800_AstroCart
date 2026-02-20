@@ -294,7 +294,7 @@ module top (
     // Decoders (Using SAFE address)
     wire is_rom   = (a_safe[15] | a_safe[14]);          // $4000-$FFFF
     wire is_pokey = (a_safe[15:4] == 12'h045);          // $0450-$045F
-    wire is_2200  = (a_safe == 16'h2200);               // $2200 (Menu Control)
+    wire is_2200  = (a_safe == 16'h2200) && !game_loaded;  // $2200 (Menu Control disabled in game)
 
     // ========================================================================
     // 3. BUS ARBITRATION
@@ -489,9 +489,10 @@ module top (
     // [FIX 4] Drive IP Address from LATCHED register, NOT direct Mux
     // V87: CRITICAL DISCOVERY! The Gowin PSRAM HS IP addr port is 21 bits.
     // The IP expects a HALF-WORD (16-bit) address!
-    // Since latched_ip_addr_reg is a BYTE address, we must divide by 2, NOT by 4!
-    // -> ip_addr must use [21:1], NOT [21:2].
-    assign ip_addr = latched_ip_addr_reg[21:1];
+    // To ensure 32-bit aligned reads match the latched_byte_offset multiplexer,
+    // we must align the requested IP address to an EVEN half-word (lowest bit 0).
+    // Note: Writing is unaffected because latched_ip_addr_reg is always a multiple of 16 during SD load.
+    assign ip_addr = {latched_ip_addr_reg[21:2], 1'b0};
     
     // [FIX 5] Latch Write Data inside IP Controller to avoid Race Condition
     // V65: 32-bit Latch
