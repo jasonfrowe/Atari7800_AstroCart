@@ -49,12 +49,20 @@ module top (
     reg rw_safe;
     reg halt_safe;
 
+    // NEW: Glitch Filter for Address Bus
+    reg [15:0] a_delay;
+    reg [15:0] a_stable;
+
     // Run synchronization on FAST clock
     always @(posedge sys_clk) begin
         a_safe    <= a;
         phi2_safe <= phi2;
         rw_safe   <= rw;
         halt_safe <= halt;
+        
+        // Only accept the address if it hasn't changed for 2 clock ticks (~50ns)
+        a_delay <= a_safe;
+        if (a_safe == a_delay) a_stable <= a_safe;
     end
 
     // ========================================================================
@@ -418,13 +426,13 @@ module top (
     
     // V83: The 1-cycle crc_scan_req pulse vanishes before IP_IDLE latches the address!
     // We must use active_req_source == 3'd6 which persists throughout the memory read sequence!
-    wire [21:0] psram_addr_mux = (game_loaded)   ? {6'b0, a_safe} - 22'h004000 : 
+    wire [21:0] psram_addr_mux = (game_loaded)   ? {6'b0, a_stable} - 22'h004000 : 
                                  (crc_scan_req || active_req_source == 3'd6)  ? crc_address[21:0] :
                                  (is_psram_diag0) ? 22'h000000 : 
                                  (is_psram_diag1) ? 22'h000001 : 
-                                 (is_psram_diag2) ? 22'h000000 : // P2 Force Addr 0
-                                 (is_psram_diag3) ? 22'h000000 : // P3 Force Addr 0
-                                 (is_psram_diag6) ? 22'h000000 : // P7 Force Addr 0
+                                 (is_psram_diag2) ? 22'h000000 : 
+                                 (is_psram_diag3) ? 22'h000000 : 
+                                 (is_psram_diag6) ? 22'h000000 : 
                                  {psram_write_addr_latched[21:0]};
     
     reg [7:0] psram_read_latch;
@@ -525,7 +533,8 @@ module top (
     reg [7:0] ip_wait_count;  // Extended to 8-bit for longer timeout
     reg       ip_is_write;    // Remember if current operation is write
     reg [1:0] latched_byte_offset; // V51v: Latch byte offset
-    
+    reg [1:0] valid_pulse_cnt; // NEW: Tracks the 4 beats of the read burst
+
     assign psram_dout = ip_data_buffer;
     assign psram_data_ready = (ip_state == IP_IDLE) && init_calib_synced;
     assign psram_busy = !init_calib_synced || (ip_state != IP_IDLE) || ip_cmd_en;
@@ -583,6 +592,7 @@ module top (
                             
                             ip_wait_count <= 8'h0;
                             ip_is_write <= 1'b0;
+                            valid_pulse_cnt <= 2'b00; // Reset burst counter
                             ip_state <= IP_ACTIVE; // Readers go directly to ACTIVE
                         end
 
@@ -603,16 +613,10 @@ module top (
                     ip_cmd_en <= 1'b0;
                     
                     if (ip_is_write) begin
-                        // V85: Sequence the 4-word (16-byte) burst write PERFECTLY
-                        // T0 (IDLE):   cmd_en=1, wr_data=acc_word0 (Beat 0)
-                        // T1 (ACTIVE): cmd_en=0, wr_data=acc_word1 (Beat 1)
-                        // T2 (ACTIVE): cmd_en=0, wr_data=acc_word2 (Beat 2)
-                        // T3 (ACTIVE): cmd_en=0, wr_data=acc_word3 (Beat 3)
+                        // (Keep your existing write logic here)
                         if (ip_wait_count == 0) ip_wr_data_latch <= acc_word1;
                         else if (ip_wait_count == 1) ip_wr_data_latch <= acc_word2;
                         else if (ip_wait_count == 2) ip_wr_data_latch <= acc_word3;
-                        
-                        // Keep mask at 0000 for the entire burst (we want to write all 16 bytes)
                         ip_data_mask <= 4'b0000;
                     end
 
@@ -620,32 +624,30 @@ module top (
                     if (ip_wait_count > latch_max_wait) latch_max_wait <= ip_wait_count;
                     
                     if (ip_rd_data_valid) begin
-                         // READ LOGIC (Unchanged - this part is correct)
-                         // It captures the first word and exits immediately, 
-                         // effectively masking the read burst.
-                        case (active_req_source)
-                            3'd4: latch_p4 <= psram_write_addr_latched[15:8];  
-                            default: begin
-                                ip_data_buffer <= (latched_byte_offset == 0) ? ip_rd_data[7:0] :
-                                                  (latched_byte_offset == 1) ? ip_rd_data[15:8] :
-                                                  (latched_byte_offset == 2) ? ip_rd_data[23:16] : ip_rd_data[31:24];
-                            end
-                        endcase
-                        // V79: DO NOT ABORT BURST IF CRC SCAN. 
-                        // CRC scan needs all 4 words. Single reads can abort early.
-                        if (active_req_source == 3'd6) begin
-                            // Wait for the full burst (latency + 4 words)
-                            // If latency is 6, beats are at counts 6, 7, 8, 9. 
-                            if (ip_wait_count >= 8'd9) begin 
-                                ip_state <= IP_IDLE; // Wait for full burst
-                            end
-                        end else begin
-                            ip_state <= IP_IDLE; // Single read exits immediately
-                        end
+                         // We MUST wait for all 4 beats of the burst to finish!
+                         valid_pulse_cnt <= valid_pulse_cnt + 1;
+                         
+                         // ONLY capture data on the VERY FIRST beat of the burst 
+                         if (valid_pulse_cnt == 0) begin
+                             case (active_req_source)
+                                 3'd4: latch_p4 <= psram_write_addr_latched[15:8];  
+                                 default: begin
+                                     ip_data_buffer <= (latched_byte_offset == 0) ? ip_rd_data[7:0] :
+                                                       (latched_byte_offset == 1) ? ip_rd_data[15:8] :
+                                                       (latched_byte_offset == 2) ? ip_rd_data[23:16] : ip_rd_data[31:24];
+                                 end
+                             endcase
+                         end
+                         
+                         // CRITICAL FIX: Do NOT abort burst! 
+                         // Exit ONLY when the 4th word of the 16-byte burst arrives.
+                         if (valid_pulse_cnt == 3) begin
+                             ip_state <= IP_IDLE; 
+                         end
 
                     end else if (ip_is_write && ip_wait_count >= 8'd15) begin
                         ip_state <= IP_IDLE;
-                    end else if (!ip_is_write && ip_wait_count >= 8'd250) begin // Increased to 250 (max 8-bit)
+                    end else if (!ip_is_write && ip_wait_count >= 8'd250) begin 
                         ip_data_buffer <= 8'hEE;
                         ip_state <= IP_IDLE;
                     end else if (ip_wait_count >= 8'd255) begin
@@ -768,11 +770,12 @@ module top (
              // We trigger the read the moment `a_safe` changes, regardless of `phi2` state.
              // The 6502 asserts the address during PHI1 (or late PHI2 of prev cycle). 
              // We want the 750ns PSRAM IP to start working IMMEDIATELY.
-             if ((game_loaded && is_rom && !psram_busy && (a_safe != last_req_addr)) || 
+             // READ REQUEST (Trigger on Address change, OR diag peak)
+             if ((game_loaded && (a_stable[15] | a_stable[14]) && !psram_busy && (a_stable != last_req_addr)) || 
                  (diag_read_trigger && !psram_busy) ||
                  (crc_scan_req && !psram_busy)) begin
                    psram_rd_req <= 1;
-                   last_req_addr <= a_safe; // Immediately record that we are requesting this address
+                   last_req_addr <= a_stable; // Record the STABLE address
                    last_req_rw <= rw_safe;
                    
                    // Mark diagnostic region as read & Set Source
