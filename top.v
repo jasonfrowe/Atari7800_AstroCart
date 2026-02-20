@@ -482,7 +482,11 @@ module top (
     
     // Byte-level conversion logic
     // [FIX 4] Drive IP Address from LATCHED register, NOT direct Mux
-    assign ip_addr = latched_ip_addr_reg[21:2];
+    // V87: CRITICAL DISCOVERY! The Gowin PSRAM HS IP addr port is 21 bits.
+    // The IP expects a HALF-WORD (16-bit) address!
+    // Since latched_ip_addr_reg is a BYTE address, we must divide by 2, NOT by 4!
+    // -> ip_addr must use [21:1], NOT [21:2].
+    assign ip_addr = latched_ip_addr_reg[21:1];
     
     // [FIX 5] Latch Write Data inside IP Controller to avoid Race Condition
     // V65: 32-bit Latch
@@ -1057,11 +1061,7 @@ module top (
                                   // current load addr is 15, 31, etc. Masking low 4 bits gives 0, 16, etc.
                                   psram_write_addr_latched <= {psram_load_addr[22:4], 4'b0000};
                                   
-                                  // DEBUG ISOLATION: Capture the exact values that are about to be written for Burst 0
-                                  if (psram_load_addr == 15) begin 
-                                      latch_p2 <= acc_word1;
-                                      latch_p3 <= acc_word2; 
-                                  end                             
+                                  if (current_sector == 0) begin if (psram_load_addr == 15) latch_p5 <= 8'h11; /* arbitrary debug */ if (psram_load_addr == 31) latch_p6 <= 8'h22; end                             
                              end
                              
                              checksum <= checksum + sd_dout_reg;
@@ -1133,7 +1133,8 @@ module top (
                           // V81: Capture first 3 words of the very first burst into diagnostic latches P7, P2, P3
                           if (crc_address == 23'h000000) begin
                               if (crc_burst_count == 0) latch_p7 <= ip_rd_data;
-                              // P2 and P3 are repurposed to capture acc_word directly during write.
+                              else if (crc_burst_count == 1) latch_p2 <= ip_rd_data;
+                              else if (crc_burst_count == 2) latch_p3 <= ip_rd_data;
                           end
                                             
                           crc_burst_count <= crc_burst_count + 1;
