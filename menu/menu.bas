@@ -96,6 +96,8 @@ draw_hud
  plotchars $7F90 1 80 17 14
  plotchars $7FA0 1 10 18 14
  plotchars $7FB0 1 80 18 14
+ plotchars $7FC0 1 10 19 14
+ plotchars $7FD0 1 80 19 14
  return
 
 

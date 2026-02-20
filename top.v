@@ -193,28 +193,35 @@ module top (
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    4'h6: begin // $x460: P2:XX (Addr 0 - Dedicated Latch)
+                    4'h6: begin // $x460: P2:XX (crc_burst word 1)
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h32; // '2'
                             4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(latch_p2[7:4]);
-                            4'h4: data_out <= to_hex_ascii(latch_p2[3:0]);
-                            // Note: Labels A0/A1 are hardcoded below, they don't reflect actual address
-                            4'h5: data_out <= 8'h41; // 'A'
-                            4'h6: data_out <= 8'h30; // '0'
+                            4'h3: data_out <= to_hex_ascii(latch_p2[31:28]);
+                            4'h4: data_out <= to_hex_ascii(latch_p2[27:24]);
+                            4'h5: data_out <= to_hex_ascii(latch_p2[23:20]);
+                            4'h6: data_out <= to_hex_ascii(latch_p2[19:16]);
+                            4'h7: data_out <= to_hex_ascii(latch_p2[15:12]);
+                            4'h8: data_out <= to_hex_ascii(latch_p2[11:8]);
+                            4'h9: data_out <= to_hex_ascii(latch_p2[7:4]);
+                            4'hA: data_out <= to_hex_ascii(latch_p2[3:0]);
                             default: data_out <= 8'h20;
                         endcase
                     end
-                    4'h7: begin // $x470: P3:XX (Addr 1 - Dedicated Latch)
+                    4'h7: begin // $x470: P3:XX (crc_burst word 2)
                         case (a_safe[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h33; // '3'
                             4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(latch_p3[7:4]);
-                            4'h4: data_out <= to_hex_ascii(latch_p3[3:0]);
-                            4'h5: data_out <= 8'h41; // 'A'
-                            4'h6: data_out <= 8'h31; // '1'
+                            4'h3: data_out <= to_hex_ascii(latch_p3[31:28]);
+                            4'h4: data_out <= to_hex_ascii(latch_p3[27:24]);
+                            4'h5: data_out <= to_hex_ascii(latch_p3[23:20]);
+                            4'h6: data_out <= to_hex_ascii(latch_p3[19:16]);
+                            4'h7: data_out <= to_hex_ascii(latch_p3[15:12]);
+                            4'h8: data_out <= to_hex_ascii(latch_p3[11:8]);
+                            4'h9: data_out <= to_hex_ascii(latch_p3[7:4]);
+                            4'hA: data_out <= to_hex_ascii(latch_p3[3:0]);
                             default: data_out <= 8'h20;
                         endcase
                     end
@@ -389,9 +396,7 @@ module top (
     // We cannot drive IP address directly from 'a_safe' via MUX because 'a_safe' changes
     // while IP is busy. We must latch it.
     reg [22:0] latched_ip_addr_reg; // V68: Fixed width to 23 bits
-
-    wire [22:0] psram_cmd_addr = {7'b0, psram_addr_mux}; // V68: 23 bits
-    
+    wire [22:0] psram_cmd_addr = (crc_scan_req || active_req_source == 3'd6) ? crc_address : {7'b0, psram_addr_mux}; // V84: Sweep address is already 23-bit aligned!
     wire is_psram_diag0 = (!game_loaded && a_safe >= 16'h7F40 && a_safe <= 16'h7F4F);
     wire is_psram_diag1 = (!game_loaded && a_safe >= 16'h7F50 && a_safe <= 16'h7F5F);
     wire is_psram_diag2 = (!game_loaded && a_safe >= 16'h7F60 && a_safe <= 16'h7F6F);
@@ -406,7 +411,10 @@ module top (
     // V62: Use LATCHED write address for IP to avoid race with loop increment
     reg [22:0] psram_write_addr_latched;
     
+    // V83: The 1-cycle crc_scan_req pulse vanishes before IP_IDLE latches the address!
+    // We must use active_req_source == 3'd6 which persists throughout the memory read sequence!
     wire [21:0] psram_addr_mux = (game_loaded)   ? {6'b0, a_safe} - 22'h004000 : 
+                                 (crc_scan_req || active_req_source == 3'd6)  ? crc_address[21:0] :
                                  (is_psram_diag0) ? 22'h000000 : 
                                  (is_psram_diag1) ? 22'h000001 : 
                                  (is_psram_diag2) ? 22'h000000 : // P2 Force Addr 0
@@ -547,7 +555,14 @@ module top (
                             
                             ip_wait_count <= 8'h0;
                             ip_is_write <= 1'b1;
-                            ip_state <= IP_SETUP; // Writers go to SETUP
+                            
+                            // V85: [OPTIMIZATION] WRITES ALSO SKIP SETUP!
+                            // The 1-cycle delay in IP_SETUP misaligned the `acc_word` array,
+                            // duplicating word 0 and dropping word 3.
+                            // By asserting cmd_en immediately, it perfectly maps:
+                            // Beat 0: acc_word0, Beat 1: acc_word1, Beat 2: acc_word2, Beat 3: acc_word3
+                            ip_cmd_en <= 1'b1;
+                            ip_state <= IP_ACTIVE;
                         end else begin
                             // [OPTIMIZATION] READS SKIP SETUP!
                             // Issue command immediately
@@ -568,17 +583,8 @@ module top (
                     end
                 end
                 
+                // IP_SETUP DEPRECATED IN V85
                 IP_SETUP: begin
-                    // ONLY WRITES COME HERE NOW
-                    
-                    // V51u: One cycle setup, then assert cmd_en
-                    ip_cmd_en <= 1'b1;
-                    
-                    // CRITICAL FIX: DO NOT set mask to 1111 yet!
-                    // We need the mask to be 0000 during the NEXT cycle (when cmd_en is seen)
-                    // so that the FIRST word is written.
-                    // Keep mask 0000 (set in IDLE).
-                    
                     ip_state <= IP_ACTIVE;
                 end
                 
@@ -586,13 +592,19 @@ module top (
                     // Pulse cmd_en for 1 cycle
                     ip_cmd_en <= 1'b0;
                     
-                    // CRITICAL FIX: Mask the TAIL of the burst.
-                    // Now that the command is issued, we must block writes for the
-                    // remaining 3 words of the burst (Cycles 2, 3, 4).
-                    if (ip_is_write) ip_data_mask <= 4'b1111; 
-                    
-                    // Note: We don't need to reset to 0000 here. 
-                    // IP_IDLE handles the reset to 0000 for the next transaction.
+                    if (ip_is_write) begin
+                        // V85: Sequence the 4-word (16-byte) burst write PERFECTLY
+                        // T0 (IDLE):   cmd_en=1, wr_data=acc_word0 (Beat 0)
+                        // T1 (ACTIVE): cmd_en=0, wr_data=acc_word1 (Beat 1)
+                        // T2 (ACTIVE): cmd_en=0, wr_data=acc_word2 (Beat 2)
+                        // T3 (ACTIVE): cmd_en=0, wr_data=acc_word3 (Beat 3)
+                        if (ip_wait_count == 0) ip_wr_data_latch <= acc_word1;
+                        else if (ip_wait_count == 1) ip_wr_data_latch <= acc_word2;
+                        else if (ip_wait_count == 2) ip_wr_data_latch <= acc_word3;
+                        
+                        // Keep mask at 0000 for the entire burst (we want to write all 16 bytes)
+                        ip_data_mask <= 4'b0000;
+                    end
 
                     ip_wait_count <= ip_wait_count + 1'b1;
                     if (ip_wait_count > latch_max_wait) latch_max_wait <= ip_wait_count;
@@ -602,9 +614,6 @@ module top (
                          // It captures the first word and exits immediately, 
                          // effectively masking the read burst.
                         case (active_req_source)
-                            3'd1: latch_p2 <= ip_rd_data[7:0]; 
-                            3'd2: latch_p3 <= psram_write_addr_latched[7:0];   
-                            3'd3: latch_p7 <= ip_rd_data; 
                             3'd4: latch_p4 <= psram_write_addr_latched[15:8];  
                             default: begin
                                 ip_data_buffer <= (latched_byte_offset == 0) ? ip_rd_data[7:0] :
@@ -612,7 +621,17 @@ module top (
                                                   (latched_byte_offset == 2) ? ip_rd_data[23:16] : ip_rd_data[31:24];
                             end
                         endcase
-                        ip_state <= IP_IDLE;
+                        // V79: DO NOT ABORT BURST IF CRC SCAN. 
+                        // CRC scan needs all 4 words. Single reads can abort early.
+                        if (active_req_source == 3'd6) begin
+                            // Wait for the full burst (latency + 4 words)
+                            // If latency is 6, beats are at counts 6, 7, 8, 9. 
+                            if (ip_wait_count >= 8'd9) begin 
+                                ip_state <= IP_IDLE; // Wait for full burst
+                            end
+                        end else begin
+                            ip_state <= IP_IDLE; // Single read exits immediately
+                        end
 
                     end else if (ip_is_write && ip_wait_count >= 8'd15) begin
                         ip_state <= IP_IDLE;
@@ -698,8 +717,8 @@ module top (
     
     // V52: Dedicated Diagnostic Latches
     // V52: Dedicated Diagnostic Latches
-    reg [7:0] latch_p2;
-    reg [7:0] latch_p3;
+    reg [31:0] latch_p2;
+    reg [31:0] latch_p3;
     reg [7:0] latch_p4; // V71: Added
     reg [7:0] latch_p5; // V71: Added
     reg [7:0] latch_p6; // V75: Added for Load Addr Debug
@@ -729,7 +748,9 @@ module top (
         end
         
         // [FIX 1] Clear Source in the SAME BLOCK to avoid Multi-Driver error
-        if (ip_rd_data_valid) active_req_source <= 0;
+        // V82: Do NOT clear if we are in the middle of a CRC sweep burst (source 6),
+        //      UNLESS the burst has finished its 4 cycles (ip_wait_count >= 9)
+        if (ip_rd_data_valid && (active_req_source != 3'd6 || ip_wait_count >= 8'd9)) active_req_source <= 0;
         
         if (!sd_reset) begin
              // READ REQUEST (Trigger on Address change, OR diag peak)
@@ -738,13 +759,16 @@ module top (
              // The 6502 asserts the address during PHI1 (or late PHI2 of prev cycle). 
              // We want the 750ns PSRAM IP to start working IMMEDIATELY.
              if ((game_loaded && is_rom && !psram_busy && (a_safe != last_req_addr)) || 
-                 (diag_read_trigger && !psram_busy)) begin
+                 (diag_read_trigger && !psram_busy) ||
+                 (crc_scan_req && !psram_busy)) begin
                    psram_rd_req <= 1;
                    last_req_addr <= a_safe; // Immediately record that we are requesting this address
                    last_req_rw <= rw_safe;
                    
                    // Mark diagnostic region as read & Set Source
-                   if (diag_read_trigger) begin
+                   if (crc_scan_req) begin
+                       active_req_source <= 3'd6; // Sweeper
+                   end else if (diag_read_trigger) begin
                        trigger_counter <= trigger_counter + 1;
                        if (is_psram_diag0) diag0_read_done <= 1;
                        if (is_psram_diag1) diag1_read_done <= 1;
@@ -868,8 +892,8 @@ module top (
     reg [5:0] post_match_cnt;
     reg [31:0] file_cluster;
     reg [31:0] debug_data_trap;
-
-    reg [7:0] first_bytes [0:7];
+    // First 16 Bytes of File
+    reg [7:0] first_bytes [0:15];
     reg [7:0] last_byte_captured;
     reg [22:0] psram_load_addr;
     reg game_loaded;
@@ -881,6 +905,16 @@ module top (
     localparam SD_DATA       = 3;
     localparam SD_NEXT       = 4;
     localparam SD_COMPLETE   = 5;
+
+    // Auto-CRC Verifier States
+    localparam SD_CRC_START  = 6;
+    localparam SD_CRC_WAIT   = 7;
+    localparam SD_CRC_NEXT   = 8;
+
+    reg [31:0] psram_checksum;
+    reg [22:0] crc_address;
+    reg crc_scan_req;
+    reg [2:0]  crc_burst_count;
 
     // Game constants (astrowing.a78 = 48KB + 128b Header = 97 Sectors)
     localparam GAME_SIZE_SECTORS = 97;
@@ -899,6 +933,7 @@ module top (
              led_0_toggle <= 0;
              game_loaded <= 0;
              psram_wr_req <= 0;
+             crc_scan_req <= 0;
              // V66: 128-bit Accumulator (16 Bytes)
              acc_word0 <= 0;
              acc_word1 <= 0;
@@ -972,52 +1007,62 @@ module top (
                          // V72: Switch to Little Endian to match PSRAM byte lane order
                          // Byte Index 0 -> [7:0], Byte Index 3 -> [31:24]
                          
-                         case (byte_index[3:2]) // Select Word
-                             2'b00: begin // Word 0
-                                 case (byte_index[1:0])
-                                     2'b00: acc_word0[7:0]   <= sd_dout_reg;
-                                     2'b01: acc_word0[15:8]  <= sd_dout_reg;
-                                     2'b10: acc_word0[23:16] <= sd_dout_reg;
-                                     2'b11: acc_word0[31:24] <= sd_dout_reg;
-                                 endcase
-                             end
-                             2'b01: begin // Word 1
-                                 case (byte_index[1:0])
-                                     2'b00: acc_word1[7:0]   <= sd_dout_reg;
-                                     2'b01: acc_word1[15:8]  <= sd_dout_reg;
-                                     2'b10: acc_word1[23:16] <= sd_dout_reg;
-                                     2'b11: acc_word1[31:24] <= sd_dout_reg;
-                                 endcase
-                             end
-                             2'b10: begin // Word 2
-                                 case (byte_index[1:0])
-                                     2'b00: acc_word2[7:0]   <= sd_dout_reg;
-                                     2'b01: acc_word2[15:8]  <= sd_dout_reg;
-                                     2'b10: acc_word2[23:16] <= sd_dout_reg;
-                                     2'b11: acc_word2[31:24] <= sd_dout_reg;
-                                 endcase
-                             end
-                             2'b11: begin // Word 3
-                                 case (byte_index[1:0])
-                                     2'b00: acc_word3[7:0]   <= sd_dout_reg;
-                                     2'b01: acc_word3[15:8]  <= sd_dout_reg;
-                                     2'b10: acc_word3[23:16] <= sd_dout_reg;
-                                     2'b11: acc_word3[31:24] <= sd_dout_reg;
-                                 endcase
-                             end
-                         endcase
+                         // V86: INDEX USING `psram_load_addr` NOT `byte_index`!
+                         // `byte_index` resets every 512-byte sector, and Sector 0 skips 128 bytes.
+                         // `psram_load_addr` continuously tracks the actual payload destination 0, 1, 2...
+                         // Therefore, configuring the 16-byte buffer based on `psram_load_addr` guarantees perfect 16-byte alignment.
+                         if (current_sector > 0 || byte_index >= 128) begin
+                             case (psram_load_addr[3:2]) // Select Word
+                                 2'b00: begin // Word 0
+                                     case (psram_load_addr[1:0])
+                                         2'b00: acc_word0[7:0]   <= sd_dout_reg;
+                                         2'b01: acc_word0[15:8]  <= sd_dout_reg;
+                                         2'b10: acc_word0[23:16] <= sd_dout_reg;
+                                         2'b11: acc_word0[31:24] <= sd_dout_reg;
+                                     endcase
+                                 end
+                                 2'b01: begin // Word 1
+                                     case (psram_load_addr[1:0])
+                                         2'b00: acc_word1[7:0]   <= sd_dout_reg;
+                                         2'b01: acc_word1[15:8]  <= sd_dout_reg;
+                                         2'b10: acc_word1[23:16] <= sd_dout_reg;
+                                         2'b11: acc_word1[31:24] <= sd_dout_reg;
+                                     endcase
+                                 end
+                                 2'b10: begin // Word 2
+                                     case (psram_load_addr[1:0])
+                                         2'b00: acc_word2[7:0]   <= sd_dout_reg;
+                                         2'b01: acc_word2[15:8]  <= sd_dout_reg;
+                                         2'b10: acc_word2[23:16] <= sd_dout_reg;
+                                         2'b11: acc_word2[31:24] <= sd_dout_reg;
+                                     endcase
+                                 end
+                                 2'b11: begin // Word 3
+                                     case (psram_load_addr[1:0])
+                                         2'b00: acc_word3[7:0]   <= sd_dout_reg;
+                                         2'b01: acc_word3[15:8]  <= sd_dout_reg;
+                                         2'b10: acc_word3[23:16] <= sd_dout_reg;
+                                         2'b11: acc_word3[31:24] <= sd_dout_reg;
+                                     endcase
+                                 end
+                             endcase
+                         end
                          
                          // Skip 128-byte Header
                          if (current_sector > 0 || byte_index >= 128) begin
-                              // Trigger Write on 16th byte
-                              // Trigger Write on 16th byte
-                              if (byte_index[3:0] == 4'hF) begin
+                          // Trigger Write on 16th byte, completely synchronized to PSRAM load address
+                          if (psram_load_addr[3:0] == 4'hF) begin
                                   write_pending <= 1;
                                   // V73: Calculate Base Address directly from current load address (Robust)
                                   // current load addr is 15, 31, etc. Masking low 4 bits gives 0, 16, etc.
                                   psram_write_addr_latched <= {psram_load_addr[22:4], 4'b0000};
                                   
-                                  if (current_sector == 0) begin if (byte_index == 143) latch_p5 <= psram_load_addr[7:0]; if (byte_index == 159) latch_p6 <= psram_load_addr[7:0]; end                             end
+                                  // DEBUG ISOLATION: Capture the exact values that are about to be written for Burst 0
+                                  if (psram_load_addr == 15) begin 
+                                      latch_p2 <= acc_word1;
+                                      latch_p3 <= acc_word2; 
+                                  end                             
+                             end
                              
                              checksum <= checksum + sd_dout_reg;
                              last_byte_captured <= sd_dout_reg;
@@ -1032,6 +1077,14 @@ module top (
                                  else if (byte_index == 133) first_bytes[5] <= sd_dout_reg;
                                  else if (byte_index == 134) first_bytes[6] <= sd_dout_reg;
                                  else if (byte_index == 135) first_bytes[7] <= sd_dout_reg;
+                                 else if (byte_index == 136) first_bytes[8] <= sd_dout_reg;
+                                 else if (byte_index == 137) first_bytes[9] <= sd_dout_reg;
+                                 else if (byte_index == 138) first_bytes[10] <= sd_dout_reg;
+                                 else if (byte_index == 139) first_bytes[11] <= sd_dout_reg;
+                                 else if (byte_index == 140) first_bytes[12] <= sd_dout_reg;
+                                 else if (byte_index == 141) first_bytes[13] <= sd_dout_reg;
+                                 else if (byte_index == 142) first_bytes[14] <= sd_dout_reg;
+                                 else if (byte_index == 143) first_bytes[15] <= sd_dout_reg;
                              end
                              
                              // V69: Only increment target address in valid data region
@@ -1048,6 +1101,57 @@ module top (
                      if (current_sector < 96) begin // 0 to 96 = 97 sectors
                           current_sector <= current_sector + 1;
                           sd_state <= SD_START;
+                      end else begin
+                          // DONE SD LOAD. Proceed to Auto-CRC Verifier Sweep.
+                          sd_state <= SD_CRC_START;
+                          // V78: Start sweep at 0, since data is written starting at 0.
+                          crc_address <= 23'h000000;
+                          psram_checksum <= 0;
+                          crc_burst_count <= 0;
+                      end
+                  end
+                  
+                  SD_CRC_START: begin
+                      if (!psram_busy) begin // Wait for PSRAM to be ready
+                           // Set the request flag for the main driver block
+                           crc_scan_req <= 1;
+                           sd_state <= SD_CRC_WAIT;
+                           crc_burst_count <= 0;
+                      end
+                  end
+                  
+                  SD_CRC_WAIT: begin
+                      crc_scan_req <= 0;
+                      if (ip_rd_data_valid) begin
+                          // Checksum the 32-bit burst returning from PSRAM
+                          psram_checksum <= psram_checksum + 
+                                            {24'b0, ip_rd_data[7:0]} + 
+                                            {24'b0, ip_rd_data[15:8]} + 
+                                            {24'b0, ip_rd_data[23:16]} + 
+                                            {24'b0, ip_rd_data[31:24]};
+                          
+                          // V81: Capture first 3 words of the very first burst into diagnostic latches P7, P2, P3
+                          if (crc_address == 23'h000000) begin
+                              if (crc_burst_count == 0) latch_p7 <= ip_rd_data;
+                              // P2 and P3 are repurposed to capture acc_word directly during write.
+                          end
+                                            
+                          crc_burst_count <= crc_burst_count + 1;
+                          
+                          // After collecting all 4 words of the burst, move to next address
+                          if (crc_burst_count == 3) begin
+                              sd_state <= SD_CRC_NEXT;
+                          end
+                      end
+                  end
+                  
+                  SD_CRC_NEXT: begin
+                      // 48KB ROM = 49152 Bytes = 0xC000
+                      // V83: crc_address is actually a BYTE address, because ip_addr chops the bottom 2 bits off.
+                      // So it must stop at 0xC000 (0xBFF0 to prevent overflow), and advance by 16 bytes per burst.
+                      if (crc_address < 23'h00BFF0) begin 
+                          crc_address <= crc_address + 16; // Advance 4 words (16 bytes)
+                          sd_state <= SD_CRC_START;
                       end else begin
                           sd_state <= SD_COMPLETE;
                           busy <= 0;

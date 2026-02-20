@@ -24,6 +24,7 @@ fi
 
 echo "Generating game.hex from menu ROM..."
 python3 rom_gen.py menu/menu.bas.bin
+# python3 rom_gen.py astrowing.bin
 echo -e "${GREEN}✓ game.hex generated${NC}"
 
 # Find Gowin IDE installation
@@ -47,8 +48,8 @@ cat > "$BUILD_TCL" << EOF
 set_device GW1NR-LV9QN88PC6/I5 -name GW1NR-9C
 add_file -type verilog "$PROJECT_DIR/top.v"
 add_file -type verilog "$PROJECT_DIR/sd_controller.v"
-add_file -type verilog "$PROJECT_DIR/psram_define.v"
-add_file -type verilog "$PROJECT_DIR/psram_param.v"
+add_file -type verilog "$PROJECT_DIR/psram_memory_interface_hs/temp/PSRAM_HS/psram_define.v"
+add_file -type verilog "$PROJECT_DIR/psram_memory_interface_hs/temp/PSRAM_HS/psram_param.v"
 add_file -type verilog "$PROJECT_DIR/psram_memory_interface_hs/psram_memory_interface_hs.v"
 add_file -type verilog "$PROJECT_DIR/a78_loader.v"
 add_file -type verilog "$PROJECT_DIR/pokey_advanced.v"
