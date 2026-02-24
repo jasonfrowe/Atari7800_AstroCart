@@ -100,7 +100,35 @@ IO_PORT "sd_miso" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 IO_LOC "sd_clk" 36;      // TF_SCLK: IOB29B
 IO_PORT "sd_clk" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
 
-// --- PSRAM PINS (disabled - no PSRAM ports in this build) ---
+// --- PSRAM PINS (for Gowin IP Core) ---
+// Tang Nano 9K onboard PSRAM (W955D8MBYA HyperRAM) - runs at 1.8V
+// NOTE: Pins commented out to avoid conflicts - letting Gowin auto-route
+// The IP Core should handle pin assignment internally for onboard PSRAM
+//IO_LOC "O_psram_ck[0]" 83;
+//IO_LOC "O_psram_cs_n[0]" 51;
+//IO_LOC "O_psram_reset_n[0]" 52;
+//IO_LOC "IO_psram_rwds[0]" 86;
+//IO_LOC "IO_psram_dq[0]" 85;
+//IO_LOC "IO_psram_dq[1]" 84;
+//IO_LOC "IO_psram_dq[2]" 82;
+//IO_LOC "IO_psram_dq[3]" 81;
+//IO_LOC "IO_psram_dq[4]" 80;
+//IO_LOC "IO_psram_dq[5]" 79;
+//IO_LOC "IO_psram_dq[6]" 56;
+//IO_LOC "IO_psram_dq[7]" 55;
+
+IO_PORT "O_psram_ck[0]" IO_TYPE=LVCMOS18 PULL_MODE=NONE DRIVE=8;
+IO_PORT "O_psram_cs_n[0]" IO_TYPE=LVCMOS18 PULL_MODE=UP DRIVE=8;
+IO_PORT "O_psram_reset_n[0]" IO_TYPE=LVCMOS18 PULL_MODE=UP DRIVE=8;
+IO_PORT "IO_psram_rwds[0]" IO_TYPE=LVCMOS18 PULL_MODE=DOWN DRIVE=8;
+IO_PORT "IO_psram_dq[0]" IO_TYPE=LVCMOS18 PULL_MODE=DOWN DRIVE=8;
+IO_PORT "IO_psram_dq[1]" IO_TYPE=LVCMOS18 PULL_MODE=DOWN DRIVE=8;
+IO_PORT "IO_psram_dq[2]" IO_TYPE=LVCMOS18 PULL_MODE=DOWN DRIVE=8;
+IO_PORT "IO_psram_dq[3]" IO_TYPE=LVCMOS18 PULL_MODE=DOWN DRIVE=8;
+IO_PORT "IO_psram_dq[4]" IO_TYPE=LVCMOS18 PULL_MODE=DOWN DRIVE=8;
+IO_PORT "IO_psram_dq[5]" IO_TYPE=LVCMOS18 PULL_MODE=DOWN DRIVE=8;
+IO_PORT "IO_psram_dq[6]" IO_TYPE=LVCMOS18 PULL_MODE=DOWN DRIVE=8;
+IO_PORT "IO_psram_dq[7]" IO_TYPE=LVCMOS18 PULL_MODE=DOWN DRIVE=8;
 
 // --- Oscilloscope Debug Pins ---
 IO_LOC "debug_pin1" 80;

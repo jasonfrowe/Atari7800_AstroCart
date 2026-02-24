@@ -19,8 +19,13 @@ module top (
     input        sd_miso,   // SPI MISO (Master In, Slave Out)
     output       sd_clk,    // SPI Clock
     
-    // PSRAM disabled - ports removed for baseline ROM+SD test
-    // (restore when re-adding PSRAM)
+    // PSRAM (Tang Nano 9K - Gowin IP Core)
+    output wire [0:0] O_psram_ck,      // Clock
+    output wire [0:0] O_psram_ck_n,    // Clock inverted
+    output wire [0:0] O_psram_cs_n,    // CS#
+    output wire [0:0] O_psram_reset_n, // Reset#
+    inout [7:0]       IO_psram_dq,     // 8-bit Data
+    inout [0:0]       IO_psram_rwds,   // RWDS
     
     output       audio,     // Audio PWM
     output [5:0] led,       // Debug LEDs
@@ -655,12 +660,33 @@ module top (
         end
     end
     
-    // PSRAM STUBBED OUT — ip_init_calib=1 keeps psram_busy=0 (IP_IDLE forever)
-    //                     ip_rd_data_valid=0 means no reads complete
-    //                     ip_rd_data=0 (safe default)
-    assign ip_init_calib  = 1'b1; // Pretend always calibrated
-    assign ip_rd_data_valid = 1'b0; // No reads ever complete
-    assign ip_rd_data     = 32'h0;
+    // Instantiate Gowin PSRAM IP (at top level for auto-routing)
+    PSRAM_Memory_Interface_HS_Top psram_ip (
+        .clk(sys_clk),              // 27MHz system clock
+        .memory_clk(clk_81m),       // 54MHz PSRAM clock
+        .pll_lock(pll_lock),        // PLL lock signal
+        .rst_n(pll_lock),           // Active-high reset
+        
+        // [FIX 1] Use ip_is_write (latched) instead of psram_cmd_write (transient)
+        // psram_cmd_write drops to 0 before cmd_en goes high!
+        .cmd(ip_is_write),      // 0=read, 1=write
+        .cmd_en(ip_cmd_en),
+        .addr(ip_addr),
+        .wr_data(ip_wr_data),
+        .data_mask(ip_data_mask),    // Use byte mask to prevent neighbor overwrites
+        .rd_data(ip_rd_data),
+        .rd_data_valid(ip_rd_data_valid),
+        .init_calib(ip_init_calib),
+        .clk_out(ip_clk_out),
+        
+        // PSRAM Hardware Interface
+        .O_psram_ck(O_psram_ck),
+        .O_psram_ck_n(O_psram_ck_n),
+        .O_psram_cs_n(O_psram_cs_n),
+        .O_psram_reset_n(O_psram_reset_n),
+        .IO_psram_dq(IO_psram_dq),
+        .IO_psram_rwds(IO_psram_rwds)
+    );
     
     // PSRAM Read/Write Logic (CDC Handshake)
     
@@ -1155,8 +1181,7 @@ module top (
                      if (a_safe == 16'h2200 && !rw_safe && phi2_safe) begin
                          if (!game_loaded && d == 8'hA5) begin
                              // LOCK: Switch to Game Mode
-                             // PSRAM STUB: never set game_loaded (no PSRAM to read from)
-                             // game_loaded <= 1;
+                             game_loaded <= 1;
                          end
                          else if (d == 8'h5A) begin
                              // RELOAD: Magic Key 0x5A
