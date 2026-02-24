@@ -710,6 +710,7 @@ module top (
     reg [7:0] last_byte_captured;
     reg [22:0] psram_load_addr;
     reg game_loaded;
+    reg switch_pending;
         
     // Simplified Sequential Loader (Full Implementation)
     localparam SD_IDLE       = 0;
@@ -745,6 +746,7 @@ module top (
              led_debug_byte <= 0;
              led_0_toggle <= 0;
              game_loaded <= 0;
+             switch_pending <= 0;
              psram_wr_req <= 0;
              crc_scan_req <= 0;
              acc_word0 <= 0;
@@ -947,7 +949,8 @@ module top (
                      if (a_stable == 16'h2200 && !rw_safe && phi2_safe) begin
                          if (!game_loaded && d == 8'hA5) begin
                              // LOCK: Switch to Game Mode
-                             game_loaded <= 1;
+                             // V95: Delayed Handover. Arm switch, wait for Reset Vector ($FFFC)
+                             switch_pending <= 1;
                          end
                          else if (d == 8'h5A) begin
                              // RELOAD: Magic Key 0x5A
@@ -958,7 +961,14 @@ module top (
                              checksum <= 0;
                              busy <= 1;
                              game_loaded <= 0; // Force unload
+                             switch_pending <= 0;
                          end
+                     end
+                     
+                     // Handover Execution: Switch when CPU fetches Reset Vector
+                     if (switch_pending && a_stable == 16'hFFFC) begin
+                         game_loaded <= 1;
+                         switch_pending <= 0;
                      end
                  end
              endcase

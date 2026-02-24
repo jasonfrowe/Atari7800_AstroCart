@@ -179,4 +179,7 @@ flash_loop
  ;
  ; For now, just loop (later we'll add game loading)
  ;
- return
+ ; Handover to FPGA: Jump to Reset Vector
+ asm
+   jmp ($FFFC)
+end
