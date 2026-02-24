@@ -36,9 +36,11 @@ module top (
 );
 
     // ========================================================================
-    // 0. CLOCK GENERATION (27MHz native for Atari, 81MHz PSRAM, 40.5MHz Sys)
+    // 0. CLOCK GENERATION (27MHz native for Atari, 81MHz PSRAM, 81MHz Sys)
     // ========================================================================
-    wire sys_clk; // 40.5MHz native from PLL
+    wire clk_81m;           // Declared here for sys_clk assignment
+    wire sys_clk = clk_81m; // 81MHz System Clock
+    wire clk_40m5;          // 40.5MHz for SD Card
     wire external_clk = clk;
 
     // ========================================================================
@@ -75,7 +77,6 @@ module top (
     wire [15:0] rom_index = a_stable - 16'h4000;
     
     // PSRAM / System status
-    wire clk_81m;
     wire clk_81m_shifted;
     wire pll_lock;
     
@@ -349,13 +350,13 @@ module top (
     // 5. POKEY AUDIO INSTANCE
     // ========================================================================
     
-    // Clock Divider (40.5MHz -> 1.79MHz)
-    // 40.5 / 1.79 ~= 22.6. Use 23.
+    // Clock Divider (81MHz -> 1.79MHz)
+    // 81 / 1.79 ~= 45.25. Use 45.
     reg [5:0] clk_div;
-    wire tick_179 = (clk_div == 22);
+    wire tick_179 = (clk_div == 44);
     
     always @(posedge sys_clk) begin
-        if (clk_div >= 22) clk_div <= 0;
+        if (clk_div >= 44) clk_div <= 0;
         else clk_div <= clk_div + 1;
     end
 
@@ -385,7 +386,7 @@ module top (
         .clkin(external_clk),
         .clkout(clk_81m),
         .clkoutp(clk_81m_shifted),
-        .clkoutd(sys_clk),
+        .clkoutd(clk_40m5),
         .lock(pll_lock)
     );
     
@@ -666,7 +667,7 @@ module top (
         .reset(sd_reset),
         .ready(sd_ready),
         .address(sd_address),
-        .clk(sys_clk),
+        .clk(clk_40m5),
         .status(sd_status),
         .recv_data(sd_recv_data)
     );
@@ -1117,7 +1118,7 @@ module top (
     assign led[3] = !state_dir;      // ON when Driving Bus (Output Mode)
 
     assign led[4] = write_pending;  // ON when Write active
-    assign led[5] = !state_read;    // ON when Reading (Active Low)
+    assign led[5] = !state_2200;    // ON when Reading (Active Low)
     
     // --- Oscilloscope Debug Pins ---
     // High-speed 1.8V outputs for accurate timing measurement
