@@ -352,13 +352,13 @@ module top (
     // 5. POKEY AUDIO INSTANCE
     // ========================================================================
     
-    // Clock Divider (67.5MHz -> 1.79MHz)
-    // 67.5 / 1.79 ~= 37.7. Use 38.
+    // Clock Divider (40.5MHz -> 1.79MHz)
+    // 40.5 / 1.79 ~= 22.6. Use 23.
     reg [5:0] clk_div;
-    wire tick_179 = (clk_div == 37);
+    wire tick_179 = (clk_div == 22);
     
     always @(posedge sys_clk) begin
-        if (tick_179) clk_div <= 0;
+        if (clk_div >= 22) clk_div <= 0;
         else clk_div <= clk_div + 1;
     end
 
