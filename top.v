@@ -83,6 +83,7 @@ module top (
     // Handover Registers
     reg busy;
     reg armed;
+    reg [3:0] sd_state; // Moved up for visibility
     
     // Status Byte: 0x00=Busy (Loading), 0x80=Done/Ready
     wire [7:0] status_byte = busy ? 8'h00 : 8'h80;
@@ -407,7 +408,12 @@ module top (
     // We cannot drive IP address directly from 'a_safe' via MUX because 'a_safe' changes
     // while IP is busy. We must latch it.
     reg [22:0] latched_ip_addr_reg; // V68: Fixed width to 23 bits
-    wire [22:0] psram_cmd_addr = (crc_scan_req || active_req_source == 3'd6) ? crc_address : {7'b0, psram_addr_mux};
+    
+    // V94: Use sd_state to determine CRC mode. This is stable and robust.
+    // SD_CRC_START(6), SD_CRC_WAIT(7), SD_CRC_NEXT(8)
+    wire is_crc_mode = (sd_state >= 4'd6 && sd_state <= 4'd8);
+    wire [22:0] psram_cmd_addr = (is_crc_mode) ? crc_address : {1'b0, psram_addr_mux};
+    
     wire is_psram_diag0 = (!game_loaded && a_stable >= 16'h7F40 && a_stable <= 16'h7F4F);
     wire is_psram_diag1 = (!game_loaded && a_stable >= 16'h7F50 && a_stable <= 16'h7F5F);
     wire is_psram_diag2 = (!game_loaded && a_stable >= 16'h7F60 && a_stable <= 16'h7F6F);
@@ -422,10 +428,7 @@ module top (
     // V62: Use LATCHED write address for IP to avoid race with loop increment
     reg [22:0] psram_write_addr_latched;
     
-    // V83: The 1-cycle crc_scan_req pulse vanishes before IP_IDLE latches the address!
-    // We must use active_req_source == 3'd6 which persists throughout the memory read sequence!
     wire [21:0] psram_addr_mux = (game_loaded)   ? {6'b0, a_stable} - 22'h004000 : 
-                                 (crc_scan_req || active_req_source == 3'd6)  ? crc_address[21:0] :
                                  (is_psram_diag0) ? 22'h000000 : 
                                  (is_psram_diag1) ? 22'h000001 : 
                                  (is_psram_diag2) ? 22'h000000 : 
@@ -561,9 +564,8 @@ module top (
         end
         
         // [FIX 1] Clear Source in the SAME BLOCK to avoid Multi-Driver error
-        // V82: Do NOT clear if we are in the middle of a CRC sweep burst (source 6),
-        //      UNLESS the burst has finished its 4 cycles (ip_wait_count >= 9)
-        if (!psram_busy && (active_req_source != 3'd6)) active_req_source <= 0;
+        // V94: Simplified clear. We no longer use source 6 for CRC.
+        if (!psram_busy) active_req_source <= 0;
         
         if (!sd_reset) begin
              // READ REQUEST (Trigger on Address change, OR diag peak)
@@ -580,9 +582,7 @@ module top (
                    last_req_rw <= rw_safe;
                    
                    // Mark diagnostic region as read & Set Source
-                   if (crc_scan_req) begin
-                       active_req_source <= 3'd6; // Sweeper
-                   end else if (diag_read_trigger) begin
+                   if (diag_read_trigger) begin
                        trigger_counter <= trigger_counter + 1;
                        if (is_psram_diag0) diag0_read_done <= 1;
                        if (is_psram_diag1) diag1_read_done <= 1;
@@ -686,7 +686,6 @@ module top (
     // State machine to scan for game files
     // (Localparams defined below)
     
-    reg [3:0] sd_state;
     reg [31:0] sector_num;          // 32-bit sector number
     reg [9:0] byte_index;
     reg [87:0] pattern_buf;         // 11-byte sliding window for "GAMEx   A78"
@@ -835,7 +834,7 @@ module top (
                                   // current load addr is 15, 31, etc. Masking low 4 bits gives 0, 16, etc.
                                   psram_write_addr_latched <= {psram_load_addr[22:1], 1'b0};
                                   
-                                  if (current_sector == 0) begin if (psram_load_addr == 15) latch_p5 <= 8'h11; /* arbitrary debug */ if (psram_load_addr == 31) latch_p6 <= 8'h22; end                             
+                                  // Removed arbitrary debug assignments to P5/P6
                              end
                              
                              checksum <= checksum + sd_dout_reg;
@@ -903,6 +902,7 @@ module top (
                           psram_checksum <= psram_checksum + 
                                             {24'b0, psram_dout_16[7:0]} + 
                                             {24'b0, psram_dout_16[15:8]};
+                          latch_p5 <= psram_dout_16[7:0]; // Debug: Capture last byte read
                           
                           // V81: Capture first 3 words of the very first burst into diagnostic latches P7, P2, P3
                           if (crc_address == 23'h000000) begin
@@ -928,6 +928,7 @@ module top (
                           crc_address <= crc_address + 2; // Advance 1 word (2 bytes)
                           sd_state <= SD_CRC_START;
                       end else begin
+                          latch_p6 <= crc_address[7:0]; // Debug: Final CRC Address LSB
                           sd_state <= SD_COMPLETE;
                           busy <= 0;
                       end
