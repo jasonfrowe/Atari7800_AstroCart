@@ -1,131 +1,82 @@
-# Atari 7800 AstroCart FPGA Cartridge
-
-An FPGA-based cartridge implementation for the Atari 7800 that emulates a 48KB ROM cartridge. This project uses a Gowin FPGA to provide seamless game ROM storage and interface with the Atari 7800 console.
+# Atari 7800 AstroCart - FPGA Multi-Game Cartridge
 
 ## Overview
 
-This project implements a complete Atari 7800 cartridge interface using Verilog HDL. The FPGA acts as a ROM cartridge, storing game data in Block RAM and responding to the Atari's memory bus requests in the address range `$4000-$FFFF`.
+This project implements an advanced FPGA-based cartridge for the Atari 7800 using the Tang Nano 9K (Gowin GW1NR-9). Unlike traditional single-ROM cartridges, this system features a complete menu-driven loader that reads games from an SD card, loads them into onboard PSRAM, and configures the FPGA to emulate the specific hardware required for each game (Mapper, POKEY, etc.).
 
-### Key Features
+## Key Features
 
-- **48KB ROM Storage**: Uses FPGA Block RAM for fast, reliable game storage
-- **Bus Arbitration**: Intelligent logic to drive the data bus only when needed
-- **Level Shifting**: 74LVC245 buffer control for safe 5V/3.3V interfacing
-- **Debug LEDs**: Visual indicators for bus activity, PHI2, and R/W signals
-- **Hardware Audio Output**: PWM audio pin (ready for future expansion)
+- **SD Card Loading**: Loads `.a78` game files from a FAT32 microSD card via SPI.
+- **PSRAM Storage**: Utilizes 4MB of onboard PSRAM for game storage, supporting large homebrew games and bankswitching.
+- **Menu System**: Integrated 7800basic menu for browsing and selecting games.
+- **Automatic Configuration**: Parses `.a78` headers to automatically configure mappers (ROM size, banking) and audio hardware.
+- **POKEY Audio**: Full POKEY chip emulation for high-fidelity audio.
+- **Handover Mechanism**: Seamlessly transitions control from the menu system to the loaded game using a delayed handover logic.
+
+## System Architecture
+
+The system is built around a Tang Nano 9K FPGA and interacts with the Atari 7800 via level shifters.
+
+1.  **Boot**: The FPGA initializes BRAM with the Menu ROM (`menu.bas`).
+2.  **Menu**: The Atari boots into the menu. The FPGA acts as a standard 48KB cartridge.
+3.  **Load**: User selects a game. The FPGA reads the file from SD card via SPI and writes it to PSRAM.
+4.  **Handover**: Upon completion, the FPGA switches the memory mapping from BRAM (Menu) to PSRAM (Game) and triggers a reset/handover.
 
 ## Hardware Requirements
 
-- Gowin FPGA development board (compatible with Apicula toolchain)
-- 74LVC245 octal bus transceiver for level shifting
-- Atari 7800 console
-- Appropriate connectors and wiring for the cartridge interface
+- **Tang Nano 9K** FPGA Board.
+- **MicroSD Card** (FAT32 formatted).
+- **Atari 7800** Console.
+- **Interface Board**: Custom PCB or wiring to connect FPGA 3.3V logic to Atari 5V bus (requires level shifters like 74LVC245).
 
-### Pin Connections
+## Build Process
 
-| Signal    | Direction | Description                           |
-|-----------|-----------|---------------------------------------|
-| `clk`     | Input     | 27MHz system clock                    |
-| `a[15:0]` | Input     | Address bus from Atari                |
-| `d[7:0]`  | I/O       | Bidirectional data bus                |
-| `phi2`    | Input     | Phase 2 clock (~1.79MHz)              |
-| `rw`      | Input     | Read/Write control (High = Read)      |
-| `halt`    | Input     | Halt signal                           |
-| `irq`     | Input     | Interrupt request                     |
-| `buf_dir` | Output    | Buffer direction (High = FPGA→Atari)  |
-| `buf_oe`  | Output    | Buffer enable (Low = Enabled)         |
-| `audio`   | Output    | Audio PWM output                      |
-| `led[5:0]`| Output    | Debug LEDs (active low)               |
+We use the **Gowin EDA** tools for synthesis and place-and-route.
 
-## Building the Project
+### 1. Menu Firmware
+The menu is written in `7800basic`.
+```bash
+cd menu
+./build.sh
+```
+This generates the ROM image (`game.hex`) used to initialize the FPGA Block RAM.
 
-### Prerequisites
+### 2. FPGA Bitstream
+You can build the project using the Gowin IDE:
+1.  Open Gowin IDE and create a new project for the `GW1NR-LV9QN88PC6/I5`.
+2.  Add all Verilog source files (`top.v`, `sd_controller.v.v`, `psram_controller.v`, `a78_loader.v`, `pokey_advanced.v`, `gowin_pll.v`).
+3.  Add the constraint file `atari.cst`.
+4.  Run Synthesis and Place & Route.
+5.  Program the device using the Gowin Programmer or `openFPGALoader`.
 
-- [Apicula](https://github.com/YosysHQ/apicula) - Open-source Gowin FPGA toolchain
-- Python 3.x
-- Yosys and nextpnr (included with Apicula)
+See `BUILD.md` for more detailed instructions and script usage.
 
-### Steps
+## SD Card Setup
 
-1. **Prepare your ROM file**
-   
-   Convert your Atari 7800 ROM (48KB binary) to hex format:
-   ```bash
-   python rom_gen.py your_game.a78
-   ```
-   This generates `game.hex` which will be synthesized into the FPGA bitstream.
+1.  Format a microSD card to **FAT32**.
+2.  Place `.a78` game files in the root directory.
+3.  Ensure filenames follow the naming convention expected by the menu (e.g., `GAME0.A78`, `GAME1.A78`).
 
-2. **Synthesize the design**
-   
-   Using Apicula toolchain:
-   ```bash
-   yosys -p "read_verilog top.v; synth_gowin -json Atari7800_AstroCart.json"
-   nextpnr-gowin --json Atari7800_AstroCart.json --write Atari7800_AstroCart_pnr.json --device YOUR_DEVICE --cst atari.cst
-   gowin_pack -d YOUR_DEVICE -o Atari7800_AstroCart.fs Atari7800_AstroCart_pnr.json
-   ```
-
-3. **Program the FPGA**
-   
-   Flash the `.fs` file to your FPGA board using the appropriate programmer.
-
-## Usage
-
-1. Convert your game ROM using the `rom_gen.py` script
-2. Synthesize the FPGA bitstream with the embedded ROM
-3. Program the FPGA
-4. Connect the FPGA cartridge to your Atari 7800
-5. Power on and enjoy!
+See `SD_CARD_SETUP.md` for detailed file preparation instructions.
 
 ## Memory Map
 
-The FPGA responds to the Atari's address space as follows:
-
-- `$4000 - $FFFF`: 48KB ROM (internal index 0 - 49151)
-- `$0000 - $3FFF`: Not handled (TIA/RIOT/RAM regions)
-
-The address decoder activates when `A15` or `A14` is high, ensuring the cartridge only drives the bus in its designated address range.
-
-## Debug Features
-
-The LED indicators provide real-time status:
-
-- **LED 0**: Cartridge is driving the data bus (activity indicator)
-- **LED 1**: PHI2 clock state
-- **LED 2**: Read operation active
-- **LEDs 3-5**: Reserved/Off
+| Address Range | Description | Source |
+| :--- | :--- | :--- |
+| `$0000 - $3FFF` | System RAM/IO | Atari Console |
+| `$4000 - $FFFF` | Cartridge ROM | FPGA (BRAM Menu or PSRAM Game) |
+| `$5000` | Control Register | Write: Select Game / Trigger Load |
+| `$5001` | Status Register | Read: Load Status |
 
 ## File Structure
 
-- `top.v` - Main Verilog HDL module
-- `rom_gen.py` - ROM conversion utility
-- `atari.cst` - Pin constraint file for FPGA
-- `apicula.toml` - Apicula project configuration
-- `game.hex` - Generated ROM data (created by rom_gen.py)
-
-## Technical Details
-
-### Bus Timing
-
-The FPGA runs at 27MHz, significantly faster than the Atari's ~1.79MHz bus clock. This ensures ROM reads appear instantaneous to the Atari, behaving like standard ROM chips.
-
-### Buffer Control
-
-The 74LVC245 buffer is controlled by two signals:
-- **DIR**: Always high (FPGA → Atari direction)
-- **OE**: Active low when the FPGA should drive the bus, tri-stated otherwise
-
-This prevents bus contention when the Atari accesses other memory-mapped devices (TIA, RIOT, RAM).
+- `top.v`: Main FPGA top-level module.
+- `sd_controller.v`: SPI interface for SD card.
+- `psram_controller.v`: HyperRAM/PSRAM controller.
+- `a78_loader.v`: Game loader and header parser.
+- `pokey_advanced.v`: POKEY audio emulation.
+- `menu/`: Source code for the 7800basic menu system.
 
 ## License
 
 See LICENSE file for details.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues or pull requests.
-
-## Acknowledgments
-
-- Atari 7800 homebrew community
-- Apicula and open-source FPGA toolchain developers
-- Yosys Project and nextpnr team
