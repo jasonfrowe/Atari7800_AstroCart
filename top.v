@@ -72,7 +72,7 @@ module top (
     reg [7:0] data_out;
     initial $readmemh("game.hex", rom_memory);
 
-    wire [15:0] rom_index = a_safe - 16'h4000;
+    wire [15:0] rom_index = a_stable - 16'h4000;
     
     // PSRAM / System status
     wire clk_81m;
@@ -104,11 +104,11 @@ module top (
             // --- DIAGNOSTIC ROM OVERRIDE ---
             // Use $7F00-$7FBF range (all zeros in menu.bin - safe)
             // Use a_safe[7:4] for nibble-based addressing (0-B = 12 outputs)
-            if (a_safe >= 16'h7F00 && a_safe <= 16'h7FBF) begin
-                // Use a_safe[7:4] to select the diagnostic output (0-B = 12 outputs)
-                case (a_safe[7:4])
+            if (a_stable >= 16'h7F00 && a_stable <= 16'h7FBF) begin
+                // Use a_stable[7:4] to select the diagnostic output (0-B = 12 outputs)
+                case (a_stable[7:4])
                     4'h0: begin // $x400: SD Word 0 (A9 50 85 3C)
-                        case (a_safe[3:0])
+                        case (a_stable[3:0])
                             4'h0: data_out <= 8'h53; // 'S'
                             4'h1: data_out <= 8'h44; // 'D'
                             4'h2: data_out <= 8'h3A; // ':'
@@ -127,7 +127,7 @@ module top (
                         endcase
                     end
                     4'h1: begin // $x410: ST/BC
-                        case (a_safe[3:0])
+                        case (a_stable[3:0])
                             4'h0: data_out <= 8'h53; // 'S'
                             4'h1: data_out <= 8'h54; // 'T'
                             4'h2: data_out <= 8'h3A; // ':'
@@ -143,7 +143,7 @@ module top (
                         endcase
                     end
                     4'h2: begin // $x420: SC/L
-                        case (a_safe[3:0])
+                        case (a_stable[3:0])
                             4'h0: data_out <= 8'h53; // 'S'
                             4'h1: data_out <= 8'h43; // 'C'
                             4'h2: data_out <= 8'h3A; // ':'
@@ -158,7 +158,7 @@ module top (
                         endcase
                     end
                     4'h3: begin // $x430: First Bytes Peak
-                        case (a_safe[3:0])
+                        case (a_stable[3:0])
                             4'h0: data_out <= 8'h48; // 'H'
                             4'h1: data_out <= 8'h3A; // ':'
                             4'h2: data_out <= to_hex_ascii(first_bytes[0][7:4]);
@@ -176,7 +176,7 @@ module top (
                         endcase
                     end
                     4'h4: begin // $x440: Checksum (C:XXXXXXXX) - WAS P0
-                        case (a_safe[3:0])
+                        case (a_stable[3:0])
                             4'h0: data_out <= 8'h43; // 'C'
                             4'h1: data_out <= 8'h3A; // ':'
                             4'h2: data_out <= to_hex_ascii(checksum[31:28]);
@@ -191,7 +191,7 @@ module top (
                         endcase
                     end
                     4'h5: begin // $x450: P0:XXXXXXXX (PSRAM Checksum)
-                        case (a_safe[3:0])
+                        case (a_stable[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h30; // '0'
                             4'h2: data_out <= 8'h3A; // ':'
@@ -207,7 +207,7 @@ module top (
                         endcase
                     end
                     4'h6: begin // $x460: P2:XX (crc_burst word 1)
-                        case (a_safe[3:0])
+                        case (a_stable[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h32; // '2'
                             4'h2: data_out <= 8'h3A; // ':'
@@ -223,7 +223,7 @@ module top (
                         endcase
                     end
                     4'h7: begin // $x470: P3:XX (crc_burst word 2)
-                        case (a_safe[3:0])
+                        case (a_stable[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h33; // '3'
                             4'h2: data_out <= 8'h3A; // ':'
@@ -239,7 +239,7 @@ module top (
                         endcase
                     end
                     4'h8: begin // $x480: P4:XX (Addr Mid - Dedicated Latch)
-                        case (a_safe[3:0])
+                        case (a_stable[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h34; // '4'
                             4'h2: data_out <= 8'h3A; // ':'
@@ -251,7 +251,7 @@ module top (
                         endcase
                     end
                     4'h9: begin // $x490: P5:XX (Burst LSB - Dedicated Latch)
-                        case (a_safe[3:0])
+                        case (a_stable[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h35; // '5'
                             4'h2: data_out <= 8'h3A; // ':'
@@ -263,7 +263,7 @@ module top (
                         endcase
                     end
                     4'hA: begin // $x4A0: P6:XX (Load Addr LSB - Dedicated Latch)
-                        case (a_safe[3:0])
+                        case (a_stable[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h36; // '6'
                             4'h2: data_out <= 8'h3A; // ':'
@@ -276,7 +276,7 @@ module top (
                     end
                     
                     4'hB: begin // $x4B0: P7:XX (32-bit Raw Peak - Dedicated Latch)
-                        case (a_safe[3:0])
+                        case (a_stable[3:0])
                             4'h0: data_out <= 8'h50; // 'P'
                             4'h1: data_out <= 8'h37; // '7'
                             4'h2: data_out <= 8'h3A; // ':'
@@ -300,9 +300,9 @@ module top (
     end
     
     // Decoders (Using SAFE address)
-    wire is_rom   = (a_safe[15] | a_safe[14]);          // $4000-$FFFF
-    wire is_pokey = (a_safe[15:4] == 12'h045);          // $0450-$045F
-    wire is_2200  = (a_safe == 16'h2200) && !game_loaded;  // $2200 (Menu Control disabled in game)
+    wire is_rom   = (a_stable[15] | a_stable[14]);          // $4000-$FFFF
+    wire is_pokey = (a_stable[15:4] == 12'h045);          // $0450-$045F
+    wire is_2200  = (a_stable == 16'h2200) && !game_loaded;  // $2200 (Menu Control disabled in game)
 
     // ========================================================================
     // 3. BUS ARBITRATION
@@ -363,7 +363,7 @@ module top (
         .clk(sys_clk),
         .enable_179mhz(tick_179),
         .reset_n(pll_lock),
-        .addr(a_safe[3:0]),  // Register 0-F
+        .addr(a_stable[3:0]),  // Register 0-F
         .din(d),             // Input Data (from Atari)
         .we(pokey_we),       // Synchronized Write Enable
         .audio_pwm(audio)
@@ -406,15 +406,15 @@ module top (
     // We cannot drive IP address directly from 'a_safe' via MUX because 'a_safe' changes
     // while IP is busy. We must latch it.
     reg [22:0] latched_ip_addr_reg; // V68: Fixed width to 23 bits
-    wire [22:0] psram_cmd_addr = (crc_scan_req || active_req_source == 3'd6) ? crc_address : {7'b0, psram_addr_mux}; // V84: Sweep address is already 23-bit aligned!
-    wire is_psram_diag0 = (!game_loaded && a_safe >= 16'h7F40 && a_safe <= 16'h7F4F);
-    wire is_psram_diag1 = (!game_loaded && a_safe >= 16'h7F50 && a_safe <= 16'h7F5F);
-    wire is_psram_diag2 = (!game_loaded && a_safe >= 16'h7F60 && a_safe <= 16'h7F6F);
-    wire is_psram_diag3 = (!game_loaded && a_safe >= 16'h7F70 && a_safe <= 16'h7F7F);
-    wire is_psram_diag4 = (!game_loaded && a_safe >= 16'h7F80 && a_safe <= 16'h7F8F);
-    wire is_psram_diag5 = (!game_loaded && a_safe >= 16'h7F90 && a_safe <= 16'h7F9F);
-    wire is_psram_diag6 = (!game_loaded && a_safe >= 16'h7FA0 && a_safe <= 16'h7FAF);
-    wire is_psram_diag7 = (!game_loaded && a_safe >= 16'h7FB0 && a_safe <= 16'h7FBF);
+    wire [22:0] psram_cmd_addr = (crc_scan_req || active_req_source == 3'd6) ? crc_address : {7'b0, psram_addr_mux};
+    wire is_psram_diag0 = (!game_loaded && a_stable >= 16'h7F40 && a_stable <= 16'h7F4F);
+    wire is_psram_diag1 = (!game_loaded && a_stable >= 16'h7F50 && a_stable <= 16'h7F5F);
+    wire is_psram_diag2 = (!game_loaded && a_stable >= 16'h7F60 && a_stable <= 16'h7F6F);
+    wire is_psram_diag3 = (!game_loaded && a_stable >= 16'h7F70 && a_stable <= 16'h7F7F);
+    wire is_psram_diag4 = (!game_loaded && a_stable >= 16'h7F80 && a_stable <= 16'h7F8F);
+    wire is_psram_diag5 = (!game_loaded && a_stable >= 16'h7F90 && a_stable <= 16'h7F9F);
+    wire is_psram_diag6 = (!game_loaded && a_stable >= 16'h7FA0 && a_stable <= 16'h7FAF);
+    wire is_psram_diag7 = (!game_loaded && a_stable >= 16'h7FB0 && a_stable <= 16'h7FBF);
     
     // [FIX 2] Simplified Address Mux
     // P2(Diag2), P3(Diag3), P7(Diag6) ALL READ ADDRESS 0
@@ -486,7 +486,7 @@ module top (
     reg should_drive_d;
     always @(posedge sys_clk) should_drive_d <= should_drive;
     
-    reg [15:0] a_prev;
+    reg [15:0] a_prev; // Used for edge detection
     reg rw_prev;
     
     // Diagnostic read-once latches (prevent continuous re-reading)
@@ -541,7 +541,7 @@ module top (
     end
     
     always @(posedge sys_clk) begin
-        a_prev <= a_safe;
+        a_prev <= a_stable;
         rw_prev <= rw_safe;
         
         // Reset diagnostic read-done flags ONLY on System Reset or new SD Load
@@ -942,7 +942,7 @@ module top (
                      // 3. It works even if the FPGA is emulating ROM at that address 
                      //    (because FPGA tristates data bus on Writes).
                      
-                     if (a_safe == 16'h2200 && !rw_safe && phi2_safe) begin
+                     if (a_stable == 16'h2200 && !rw_safe && phi2_safe) begin
                          if (!game_loaded && d == 8'hA5) begin
                              // LOCK: Switch to Game Mode
                              game_loaded <= 1;
@@ -1011,7 +1011,7 @@ module top (
             end else timer_a15 <= timer_a15 - 1;
         end else begin
             if (timer_a15 > 0) timer_a15 <= timer_a15 - 1;
-            else if (atari_active && !a_safe[15]) begin // GATED
+            else if (atari_active && !a_stable[15]) begin // GATED
                 state_a15 <= 1;
                 timer_a15 <= BLINK_DUR;
             end
