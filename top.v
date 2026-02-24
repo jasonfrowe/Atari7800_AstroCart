@@ -308,12 +308,9 @@ module top (
     // 3. BUS ARBITRATION
     // ========================================================================
     
-    // Valid Timing Windows
-    wire cpu_active = (phi2_safe && halt_safe);
-    wire dma_active = (!halt_safe);
-
     // Drive Enable (Read from ROM)
-    wire should_drive = is_rom && rw_safe && (cpu_active || dma_active);
+    // Simplified logic: Drive whenever address is in ROM range and R/W is Read.
+    wire should_drive = is_rom && rw_safe;
 
     // Write Enables
     wire pokey_we   = is_pokey && !rw_safe && phi2_safe;
