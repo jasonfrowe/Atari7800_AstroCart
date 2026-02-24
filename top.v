@@ -432,6 +432,7 @@ module top (
                                  (is_psram_diag1) ? 22'h000001 : 
                                  (is_psram_diag2) ? 22'h000000 : 
                                  (is_psram_diag3) ? 22'h000000 : 
+                                 (is_psram_diag4) ? 22'h000000 : 
                                  (is_psram_diag6) ? 22'h000000 : 
                                  {psram_write_addr_latched[21:0]};
     
@@ -522,9 +523,9 @@ module top (
     
     // V52: Dedicated Diagnostic Latches
     // V52: Dedicated Diagnostic Latches
-    reg [31:0] latch_p2;
-    reg [31:0] latch_p3;
-    reg [7:0] latch_p4; // V71: Added
+    reg [31:0] latch_p2 = 0;
+    reg [31:0] latch_p3 = 0;
+    reg [7:0] latch_p4 = 0; // V71: Added
     reg [7:0] latch_p5; // V71: Added
     reg [7:0] latch_p6; // V75: Added for Load Addr Debug
     reg [31:0] latch_p7;
@@ -532,6 +533,15 @@ module top (
     
     reg [15:0] last_req_addr;
     reg last_req_rw;
+    
+    // Capture diagnostic data on falling edge of busy
+    reg psram_busy_d;
+    always @(posedge sys_clk) begin
+        psram_busy_d <= psram_busy;
+        if (psram_busy_d && !psram_busy) begin
+             if (active_req_source == 3'd4) latch_p4 <= psram_dout_16[7:0];
+        end
+    end
     
     always @(posedge sys_clk) begin
         a_prev <= a_safe;
@@ -888,7 +898,9 @@ module top (
                   
                   SD_CRC_WAIT: begin
                       crc_scan_req <= 0;
-                      if (!psram_busy) begin
+                      // Fix race condition: Wait for handshake (req cleared) AND completion (busy low)
+                      // Also ensure we don't trigger on the initial state where req is still 1
+                      if (!psram_busy && !psram_rd_req && !crc_scan_req) begin
                           // Checksum the 32-bit burst returning from PSRAM
                           psram_checksum <= psram_checksum + 
                                             {24'b0, psram_dout_16[7:0]} + 
@@ -898,6 +910,8 @@ module top (
                           if (crc_address == 23'h000000) begin
                               if (crc_burst_count == 0) latch_p7 <= {16'b0, psram_dout_16};
                           end
+                          if (crc_address == 23'h000002) latch_p2 <= {16'b0, psram_dout_16};
+                          if (crc_address == 23'h000004) latch_p3 <= {16'b0, psram_dout_16};
                                             
                           crc_burst_count <= crc_burst_count + 1;
                           
@@ -912,7 +926,7 @@ module top (
                       // 48KB ROM = 49152 Bytes = 0xC000
                       // V83: crc_address is actually a BYTE address, because ip_addr chops the bottom 2 bits off.
                       // So it must stop at 0xC000 (0xBFF0 to prevent overflow), and advance by 16 bytes per burst.
-                      if (crc_address < 23'h00BFF0) begin 
+                      if (crc_address < 23'h00BFFE) begin 
                           crc_address <= crc_address + 2; // Advance 1 word (2 bytes)
                           sd_state <= SD_CRC_START;
                       end else begin
