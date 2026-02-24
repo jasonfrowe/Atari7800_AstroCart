@@ -27,10 +27,11 @@ module PsramController #(
 
     // HyperRAM physical interface. Gowin interface is for 2 dies. 
     // We currently only use the first die (4MB).
-    output [1:0] O_psram_ck,
-    inout [1:0] IO_psram_rwds,
-    inout [15:0] IO_psram_dq,
-    output [1:0] O_psram_cs_n
+    output [0:0] O_psram_ck,
+    output [0:0] O_psram_ck_n,
+    inout [0:0] IO_psram_rwds,
+    inout [7:0] IO_psram_dq,
+    output [0:0] O_psram_cs_n
 );
 
 reg [2:0] state;
@@ -56,6 +57,13 @@ reg rwds_out_ris, rwds_out_fal, rwds_oen;
 wire rwds_in_ris, rwds_in_fal;
 reg additional_latency;
 
+// Internal wires for ODDR/IDDR
+wire cs_n_tbuf;
+wire rwds_tbuf;
+wire rwds_oen_tbuf;
+wire ck_tbuf;
+wire ck_n_tbuf;
+
 assign busy = (state != IDLE_ST);
 
 localparam [3:0] CR_LATENCY = LATENCY == 3 ? 4'b1110 :
@@ -76,7 +84,7 @@ always @(posedge clk) begin
     end
     if (state == CONFIG_ST) begin
         if (cycles_sr[0]) begin
-            dq_sr <= {8'h60, 8'h00, 8'h01, 8'h00, 8'h00, 8'h00, 8'h8f, CR_LATENCY, 4'h7};      // last byte, 'e' (3 cycle latency max 83Mhz), '7' (variable 1x/2x latency)
+            dq_sr <= {8'h60, 8'h00, 8'h01, 8'h00, 8'h00, 8'h00, 8'h9f, CR_LATENCY, 4'h7};      // last byte, 'e' (3 cycle latency max 83Mhz), '7' (variable 1x/2x latency)
             dq_oen <= 0;
             ck_e <= 1;      // this needs to be earlier 1 cycle to allow for phase shifted clk_p
         end 
@@ -199,6 +207,10 @@ ODDR oddr_ck(
     .CLK(clk_p), .D0(ck_e_p), .D1(1'b0), .Q0(ck_tbuf)
 );
 assign O_psram_ck[0] = ck_tbuf;
+ODDR oddr_ck_n(
+    .CLK(clk_p), .D0(~ck_e_p), .D1(1'b1), .Q0(ck_n_tbuf)
+);
+assign O_psram_ck_n[0] = ck_n_tbuf;
 
 
 // Tristate DDR input
@@ -215,5 +227,3 @@ generate
 endgenerate
 
 endmodule
-
-
