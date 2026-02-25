@@ -89,12 +89,35 @@ module top (
     wire [7:0] status_byte = busy ? 8'h00 : 8'h80;
 
     // Checksum Logic
-    reg [31:0] checksum;
+
+    // Diagnostics Wires from Cart Loader
+    wire [9:0] byte_index;
+    wire [6:0] current_sector;
+    wire [7:0] last_byte_captured;
+    wire [31:0] checksum;
+    wire [31:0] psram_checksum;
+    wire [22:0] crc_address;
+    wire crc_scan_req;
+    
+    wire [31:0] latch_p2;
+    wire [31:0] latch_p3;
+    wire [31:0] latch_p4 = {24'b0, psram_write_addr_latched[15:8]}; // P4 is mid address
+    wire [7:0]  latch_p5;
+    wire [7:0]  latch_p6;
+    wire [31:0] latch_p7;
+    
+    wire [7:0] first_bytes_0;
+    wire [7:0] first_bytes_1;
+    wire [7:0] first_bytes_2;
+    wire [7:0] first_bytes_3;
+    
+    wire game_loaded;
+    wire switch_pending;
     
     // Hex-to-ASCII converter helper
     wire [7:0] diag_data_out;
     diag_rom diag_inst (
-        .a_stable(a_stable),
+        .a_stable(a_stable), // Glitch suppressed address
         .sd_state(sd_state),
         .byte_index(byte_index),
         .current_sector(current_sector),
@@ -107,10 +130,10 @@ module top (
         .latch_p5(latch_p5),
         .latch_p6(latch_p6),
         .latch_p7(latch_p7),
-        .fb0(first_bytes[0]),
-        .fb1(first_bytes[1]),
-        .fb2(first_bytes[2]),
-        .fb3(first_bytes[3]),
+        .fb0(first_bytes_0),
+        .fb1(first_bytes_1),
+        .fb2(first_bytes_2),
+        .fb3(first_bytes_3),
         .data_out(diag_data_out)
     );
 
@@ -127,11 +150,10 @@ module top (
             else data_out <= 8'hFF;
         end
     end
-    
-    // Decoders (Using SAFE address)
-    wire is_rom   = (a_stable[15] | a_stable[14]);          // $4000-$FFFF
-    wire is_pokey = (a_stable[15:4] == 12'h045);          // $0450-$045F
-    wire is_2200  = (a_stable == 16'h2200) && !game_loaded;  // $2200 (Menu Control disabled in game)
+    // Decoders (Using STABLE address to prevent bus contention during transitions)
+    wire is_rom   = (a_stable[15] | a_stable[14]);               // $4000-$FFFF
+    wire is_pokey = (a_stable[15:4] == 12'h045);               // $0450-$045F
+    wire is_2200  = (a_stable == 16'h2200) && !game_loaded;    // $2200 (Menu Control disabled in game)
 
     // ========================================================================
     // 3. BUS ARBITRATION
@@ -344,12 +366,6 @@ module top (
     
     // V52: Dedicated Diagnostic Latches
     // V52: Dedicated Diagnostic Latches
-    reg [31:0] latch_p2 = 0;
-    reg [31:0] latch_p3 = 0;
-    reg [7:0] latch_p4 = 0; // V71: Added
-    reg [7:0] latch_p5; // V71: Added
-    reg [7:0] latch_p6; // V75: Added for Load Addr Debug
-    reg [31:0] latch_p7;
     reg [2:0] active_req_source; // V71: Extended to 3 bits (support up to 7)
     
     reg [15:0] last_req_addr;
@@ -360,7 +376,6 @@ module top (
     always @(posedge sys_clk) begin
         psram_busy_d <= psram_busy;
         if (psram_busy_d && !psram_busy) begin
-             if (active_req_source == 3'd4) latch_p4 <= psram_dout_16[7:0];
         end
     end
     
@@ -462,338 +477,60 @@ module top (
     end
     
     // SD Controller signals
-    wire sd_ready;
-    wire [7:0] sd_dout;
-    wire sd_byte_available;
-    wire [4:0] sd_status;
-    wire [7:0] sd_recv_data;
-    
-    reg sd_rd;
-    reg [31:0] sd_address;
-    wire sd_sclk_internal;
 
-    // SD Controller
-    sd_controller sd_ctrl (
-        .cs(sd_cs),
-        .mosi(sd_mosi),
-        .miso(sd_miso),
-        .sclk(sd_sclk_internal),
-        .rd(sd_rd),
-        .dout(sd_dout),
-        .byte_available(sd_byte_available),
-        .wr(1'b0),
-        .din(8'h00),
-        .ready_for_next_byte(),
+    // ========================================================================
+    // 5. CART LOADER (SD to PSRAM)
+    // ========================================================================
+    wire write_pending_loader;
+    
+    cart_loader loader_inst (
+        .clk_sys(sys_clk),
+        .clk_sd(clk_40m5),
         .reset(sd_reset),
-        .ready(sd_ready),
-        .address(sd_address),
-        .clk(clk_40m5),
-        .status(sd_status),
-        .recv_data(sd_recv_data)
-    );
-
-    assign sd_clk = sd_sclk_internal;
-
-    // PSRAM Interface Stubs (Until PSRAM ports are added to top)
-    // reg  psram_ready = 1; // Fake ready
-    wire psram_ready = 0; // Not ready
-    
-    // File detection storage
-    reg [5:0] files_found;          // Bitmask for GAME0-GAME5
-    reg [2:0] file_count;           // Count of files detected
-    reg sd_init_done;
-    
-    // State machine to scan for game files
-    // (Localparams defined below)
-    
-    reg [31:0] sector_num;          // 32-bit sector number
-    reg [9:0] byte_index;
-    reg [87:0] pattern_buf;         // 11-byte sliding window for "GAMEx   A78"
-    reg sd_byte_available_d;        // Delayed signal for edge detection
-    reg [15:0] sector_count;        // Number of sectors scanned
-    reg [7:0] sd_dout_reg;          // Registered SD data
-    
-    // Capture/Playback Registers
-    reg capture_active;
-    reg [4:0] capture_count;
-    reg [25:0] playback_timer;
-    reg [4:0] playback_index;
-    reg [7:0] led_debug_byte;
-    reg led_0_toggle;
-    
-    // Cluster Parsing
-    reg [5:0] post_match_cnt;
-    reg [31:0] file_cluster;
-    reg [31:0] debug_data_trap;
-    // First 16 Bytes of File
-    reg [7:0] first_bytes [0:15];
-    reg [7:0] last_byte_captured;
-    reg [22:0] psram_load_addr;
-    reg game_loaded;
-    reg switch_pending;
         
-    // Simplified Sequential Loader (Full Implementation)
-    localparam SD_IDLE       = 0;
-    localparam SD_START      = 1;
-    localparam SD_WAIT       = 2;
-    localparam SD_DATA       = 3;
-    localparam SD_NEXT       = 4;
-    localparam SD_COMPLETE   = 5;
-
-    // Auto-CRC Verifier States
-    localparam SD_CRC_START  = 6;
-    localparam SD_CRC_WAIT   = 7;
-    localparam SD_CRC_NEXT   = 8;
-
-    reg [31:0] psram_checksum;
-    reg [22:0] crc_address;
-    reg crc_scan_req;
-    reg [2:0]  crc_burst_count;
-
-    // Game constants (astrowing.a78 = 48KB + 128b Header = 97 Sectors)
-    localparam GAME_SIZE_SECTORS = 97;
+        .a_stable(a_stable),
+        .d(d),
+        .rw_safe(rw_safe),
+        .phi2_safe(phi2_safe),
+        
+        .sd_cs(sd_cs),
+        .sd_mosi(sd_mosi),
+        .sd_miso(sd_miso),
+        .sd_clk(sd_clk),
+        
+        .psram_busy(psram_busy),
+        .psram_wr_req(psram_wr_req),
+        .psram_write_addr_latched(psram_write_addr_latched),
+        .acc_word0(acc_word0),
+        .psram_dout_16(psram_dout_16),
+        
+        .game_loaded(game_loaded),
+        .switch_pending(switch_pending),
+        .sd_state(sd_state),
+        .current_sector(current_sector),
+        .byte_index(byte_index),
+        .checksum(checksum),
+        .last_byte_captured(last_byte_captured),
+        .psram_checksum(psram_checksum),
+        .crc_address(crc_address),
+        .crc_scan_req(crc_scan_req),
+        
+        .latch_p2(latch_p2),
+        .latch_p3(latch_p3),
+        .latch_p5(latch_p5),
+        .latch_p6(latch_p6),
+        .latch_p7(latch_p7),
+        
+        .fb0(first_bytes_0),
+        .fb1(first_bytes_1),
+        .fb2(first_bytes_2),
+        .fb3(first_bytes_3),
+        
+        .busy(busy),
+        .write_pending(write_pending_loader)
+    );
     
-    reg [6:0] current_sector;
-    
-    reg byte_arrived_latched;
-
-    always @(posedge sys_clk) begin
-        if (sd_reset) begin
-             sd_state <= SD_IDLE;
-             sd_rd <= 0;
-             sd_address <= 0;
-             byte_index <= 0;
-             led_debug_byte <= 0;
-             led_0_toggle <= 0;
-             game_loaded <= 0;
-             switch_pending <= 0;
-             psram_wr_req <= 0;
-             crc_scan_req <= 0;
-             acc_word0 <= 0;
-             // Latch trigger address
-             burst_start_addr <= 0;
-             
-             write_pending <= 0;
-              busy <= 1; // Start busy for initial load
-              armed <= 0;
-             
-             current_sector <= 0;
-             // V61: Exact 128-byte offset (byte 128 -> addr 0)
-             psram_load_addr <= 23'h000000; // V70: Simplified, start at 0
-             sd_byte_available_d <= 0;
-             pattern_buf <= 0;
-             checksum <= 0;
-             sd_dout_reg <= 0;
-             byte_arrived_latched <= 0;
-        end else begin
-             sd_byte_available_d <= sd_byte_available;
-
-             // Edge Detection for Latch (V63)
-             if (sd_byte_available && !sd_byte_available_d) 
-                 byte_arrived_latched <= 1;
-             
-             // --- INDEPENDENT PSRAM WRITE HANDSHAKE (V51c: Sequential) ---
-             if (psram_wr_req) begin
-                  psram_wr_req <= 0;
-                  // V51r: Increment REMOVED (V62)
-                  // psram_load_addr <= psram_load_addr + 1; 
-             end else if (write_pending && !psram_busy) begin
-                  psram_wr_req <= 1;
-                  write_pending <= 0;
-             end
-            
-            case (sd_state)
-                SD_IDLE: begin
-                    if (sd_ready && sd_status == 6) begin
-                        sd_state <= SD_START;
-                        busy <= 1;
-                    end
-                end
-                
-                SD_START: begin
-                    sd_address <= current_sector;
-                    sd_rd <= 1;
-                    byte_index <= 0;
-                    sd_state <= SD_WAIT;
-                end
-                
-                SD_WAIT: begin
-                     // Flow Control: Pause SD (sd_rd=0) if we are busy writing
-                     sd_rd <= !write_pending;
-                     
-                     // V63: Use Latch instead of Edge
-                     if (byte_arrived_latched && !write_pending) begin
-                         sd_dout_reg <= sd_dout;
-                         byte_arrived_latched <= 0; // Clear Latch
-                         sd_state <= SD_DATA;
-                     end else if (byte_index >= 512 && !write_pending) begin
-                         sd_state <= SD_NEXT;
-                     end else if (sd_ready && byte_index > 0 && !write_pending) begin
-                         sd_state <= SD_NEXT;
-                     end
-                 end
-                  
-                  SD_DATA: begin
-                         // Accumulate 32-bit words (Little Endian: Byte 0 -> [7:0])
-                         // V72: Switch to Little Endian to match PSRAM byte lane order
-                         // Byte Index 0 -> [7:0], Byte Index 3 -> [31:24]
-                         
-                         // V86: INDEX USING `psram_load_addr` NOT `byte_index`!
-                         // `byte_index` resets every 512-byte sector, and Sector 0 skips 128 bytes.
-                         // `psram_load_addr` continuously tracks the actual payload destination 0, 1, 2...
-                         // Therefore, configuring the 16-byte buffer based on `psram_load_addr` guarantees perfect 16-byte alignment.
-                         if (current_sector > 0 || byte_index >= 128) begin
-                             if (psram_load_addr[0] == 0) acc_word0[7:0] <= sd_dout_reg;
-                             else acc_word0[15:8] <= sd_dout_reg;
-                         end
-                         
-                         // Skip 128-byte Header
-                         if (current_sector > 0 || byte_index >= 128) begin
-                          // Trigger Write on ODD byte (completing a 16-bit word)
-                          if (psram_load_addr[0] == 1'b1) begin
-                                  write_pending <= 1;
-                                  // V73: Calculate Base Address directly from current load address (Robust)
-                                  // current load addr is 15, 31, etc. Masking low 4 bits gives 0, 16, etc.
-                                  psram_write_addr_latched <= {psram_load_addr[22:1], 1'b0};
-                                  
-                                  // Removed arbitrary debug assignments to P5/P6
-                             end
-                             
-                             checksum <= checksum + sd_dout_reg;
-                             last_byte_captured <= sd_dout_reg;
-                             
-                             // RESTORED Debug Capture
-                             if (current_sector == 0) begin
-                                 if (byte_index == 128) first_bytes[0] <= sd_dout_reg;
-                                 else if (byte_index == 129) first_bytes[1] <= sd_dout_reg;
-                                 else if (byte_index == 130) first_bytes[2] <= sd_dout_reg;
-                                 else if (byte_index == 131) first_bytes[3] <= sd_dout_reg;
-                                 else if (byte_index == 132) first_bytes[4] <= sd_dout_reg;
-                                 else if (byte_index == 133) first_bytes[5] <= sd_dout_reg;
-                                 else if (byte_index == 134) first_bytes[6] <= sd_dout_reg;
-                                 else if (byte_index == 135) first_bytes[7] <= sd_dout_reg;
-                                 else if (byte_index == 136) first_bytes[8] <= sd_dout_reg;
-                                 else if (byte_index == 137) first_bytes[9] <= sd_dout_reg;
-                                 else if (byte_index == 138) first_bytes[10] <= sd_dout_reg;
-                                 else if (byte_index == 139) first_bytes[11] <= sd_dout_reg;
-                                 else if (byte_index == 140) first_bytes[12] <= sd_dout_reg;
-                                 else if (byte_index == 141) first_bytes[13] <= sd_dout_reg;
-                                 else if (byte_index == 142) first_bytes[14] <= sd_dout_reg;
-                                 else if (byte_index == 143) first_bytes[15] <= sd_dout_reg;
-                             end
-                             
-                             // V69: Only increment target address in valid data region
-                             psram_load_addr <= psram_load_addr + 1; 
-                         end
-                         
-                         byte_index <= byte_index + 1;
-                         sd_state <= SD_WAIT;
-                  end
-
-                 
-                 SD_NEXT: begin
-                     psram_wr_req <= 0;
-                     if (current_sector < 96) begin // 0 to 96 = 97 sectors
-                          current_sector <= current_sector + 1;
-                          sd_state <= SD_START;
-                      end else begin
-                          // DONE SD LOAD. Proceed to Auto-CRC Verifier Sweep.
-                          sd_state <= SD_CRC_START;
-                          // V78: Start sweep at 0, since data is written starting at 0.
-                          crc_address <= 23'h000000;
-                          psram_checksum <= 0;
-                          crc_burst_count <= 0;
-                      end
-                  end
-                  
-                  SD_CRC_START: begin
-                      if (!psram_busy) begin // Wait for PSRAM to be ready
-                           // Set the request flag for the main driver block
-                           crc_scan_req <= 1;
-                           sd_state <= SD_CRC_WAIT;
-                           crc_burst_count <= 0;
-                      end
-                  end
-                  
-                  SD_CRC_WAIT: begin
-                      crc_scan_req <= 0;
-                      // Fix race condition: Wait for handshake (req cleared) AND completion (busy low)
-                      // Also ensure we don't trigger on the initial state where req is still 1
-                      if (!psram_busy && !psram_rd_req && !crc_scan_req) begin
-                          // Checksum the 32-bit burst returning from PSRAM
-                          psram_checksum <= psram_checksum + 
-                                            {24'b0, psram_dout_16[7:0]} + 
-                                            {24'b0, psram_dout_16[15:8]};
-                          latch_p5 <= psram_dout_16[7:0]; // Debug: Capture last byte read
-                          
-                          // V81: Capture first 3 words of the very first burst into diagnostic latches P7, P2, P3
-                          if (crc_address == 23'h000000) begin
-                              if (crc_burst_count == 0) latch_p7 <= {16'b0, psram_dout_16};
-                          end
-                          if (crc_address == 23'h000002) latch_p2 <= {16'b0, psram_dout_16};
-                          if (crc_address == 23'h000004) latch_p3 <= {16'b0, psram_dout_16};
-                                            
-                          crc_burst_count <= crc_burst_count + 1;
-                          
-                          // After collecting all 4 words of the burst, move to next address
-                          if (crc_burst_count == 0) begin // Just 1 word per step now
-                              sd_state <= SD_CRC_NEXT;
-                          end
-                      end
-                  end
-                  
-                  SD_CRC_NEXT: begin
-                      // 48KB ROM = 49152 Bytes = 0xC000
-                      // V83: crc_address is actually a BYTE address, because ip_addr chops the bottom 2 bits off.
-                      // So it must stop at 0xC000 (0xBFF0 to prevent overflow), and advance by 16 bytes per burst.
-                      if (crc_address < 23'h00BFFE) begin 
-                          crc_address <= crc_address + 2; // Advance 1 word (2 bytes)
-                          sd_state <= SD_CRC_START;
-                      end else begin
-                          latch_p6 <= crc_address[7:0]; // Debug: Final CRC Address LSB
-                          sd_state <= SD_COMPLETE;
-                          busy <= 0;
-                      end
-                  end
-                 
-                 SD_COMPLETE: begin
-                     // Load Done. 
-                     // Wait for Menu Trigger.
-                     // TRIGGER: Write 0xA5 to Address $8000
-                     // WHY $8000? 
-                     // 1. It is ROM space. The Atari OS RAM test NEVER writes here.
-                     // 2. It avoids all POKEY/TIA/RIOT hardware mirrors.
-                     // 3. It works even if the FPGA is emulating ROM at that address 
-                     //    (because FPGA tristates data bus on Writes).
-                     
-                     if (a_stable == 16'h2200 && !rw_safe && phi2_safe) begin
-                         if (!game_loaded && d == 8'hA5) begin
-                             // LOCK: Switch to Game Mode
-                             // V95: Delayed Handover. Arm switch, wait for Reset Vector ($FFFC)
-                             switch_pending <= 1;
-                         end
-                         else if (d == 8'h5A) begin
-                             // RELOAD: Magic Key 0x5A
-                             // Only allow reload for testing/debugging
-                             sd_state <= SD_START;
-                             current_sector <= 0;
-                             psram_load_addr <= 23'h000000;
-                             checksum <= 0;
-                             busy <= 1;
-                             game_loaded <= 0; // Force unload
-                             switch_pending <= 0;
-                         end
-                     end
-                     
-                     // Handover Execution: Switch when CPU fetches Reset Vector
-                     if (switch_pending && a_stable == 16'hFFFC) begin
-                         game_loaded <= 1;
-                         switch_pending <= 0;
-                     end
-                 end
-             endcase
-        end
-    end
+    always @* write_pending = write_pending_loader;
         
 
     // ========================================================================

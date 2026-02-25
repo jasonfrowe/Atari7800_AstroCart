@@ -177,6 +177,8 @@ flash_loop
  ; Wait ~4 seconds (250 frames) for load to finish
  flash_count = 250
 wait_loop
+ restorescreen
+ gosub draw_hud
  drawscreen
  flash_count = flash_count - 1
  if flash_count > 0 then goto wait_loop

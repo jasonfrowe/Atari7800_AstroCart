@@ -49,6 +49,7 @@ set_device GW1NR-LV9QN88PC6/I5 -name GW1NR-9C
 add_file -type verilog "$PROJECT_DIR/top.v"
 add_file -type verilog "$PROJECT_DIR/sd_controller.v"
 add_file -type verilog "$PROJECT_DIR/psram_controller.v"
+add_file -type verilog "$PROJECT_DIR/cart_loader.v"
 add_file -type verilog "$PROJECT_DIR/a78_loader.v"
 add_file -type verilog "$PROJECT_DIR/diag_rom.v"
 add_file -type verilog "$PROJECT_DIR/pokey_advanced.v"
