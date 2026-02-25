@@ -1,97 +1,55 @@
 # SD Card Setup for Atari 7800 AstroCart
 
-## SD Card Formatting
+## Current Method: Raw Sector Loading (Phase 1)
 
-1. **Format**: FAT32
-   - Most microSD cards come pre-formatted as FAT32
-   - If needed, format using Disk Utility (macOS) or similar tool
-   - Recommended: 4GB to 32GB card (SD or SDHC)
+While the ultimate goal is FAT32 file support, the current FPGA core uses **Raw Sector Loading**. This means game ROMs are written directly to specific sector offsets on the SD card, bypassing the filesystem.
 
-2. **File System Structure**: 
-   - Place .a78 game files in the root directory
-   - Use sequential naming: GAME0.A78, GAME1.A78, GAME2.A78, etc.
-   - File names should be UPPERCASE (8.3 format)
+### SD Card Layout Map
 
-## Game File Preparation
+We use a **1MB Stride** (2048 sectors) for game slots. This supports games up to 1MB in size.
 
-The menu system has 5 hardcoded game slots:
+| Slot | Sector Offset | Byte Offset | Game |
+|------|---------------|-------------|------|
+| 0    | 0             | 0           | `astrowing.a78` |
+| 1    | 2048          | 1MB         | `Choplifter_NTSC.a78` |
+| 2    | 4096          | 2MB         | `ARTI_Final...a78` |
+| 3    | 6144          | 3MB         | (Reserved) |
+| 4    | 8192          | 4MB         | (Reserved) |
 
-| Slot | Menu Display | File Name    | Description              |
-|------|--------------|--------------|--------------------------|
-| 0    | ASTRO CART   | GAME0.A78    | Use astrowing.a78        |
-| 1    | DONKEY KONG  | GAME1.A78    | (placeholder)            |
-| 2    | GALAGA       | GAME2.A78    | (placeholder)            |
-| 3    | MS PAC-MAN   | GAME3.A78    | (placeholder)            |
-| 4    | DEFENDER     | GAME4.A78    | (placeholder)            |
+### Flashing Games (macOS/Linux)
 
-### Example Setup Commands
+Use the `dd` command to write games to the raw device.
 
+**WARNING:** This will overwrite data on the SD card. Ensure you select the correct device (e.g., `/dev/rdisk4`).
+
+#### 1. Identify your SD Card
 ```bash
-# Format SD card (macOS - replace diskX with your SD card identifier)
-# WARNING: This will erase all data on the card!
-diskutil eraseDisk FAT32 ATARI7800 MBRFormat /dev/diskX
-
-# Mount the card and copy files
-cd /path/to/your/games
-cp astrowing.a78 /Volumes/ATARI7800/GAME0.A78
-cp ARTI_Final_digital_edition_jan24_1.1.a78 /Volumes/ATARI7800/GAME1.A78
-
-# Create placeholder files for remaining slots (optional)
-# The system will show errors for missing games
-touch /Volumes/ATARI7800/GAME2.A78
-touch /Volumes/ATARI7800/GAME3.A78
-touch /Volumes/ATARI7800/GAME4.A78
-
-# Unmount safely
-diskutil unmount /Volumes/ATARI7800
+diskutil list
+# Look for your SD card (e.g., /dev/disk4)
+# Use /dev/rdiskN for faster access on macOS
 ```
 
-## File Format Requirements
+#### 2. Flash Games
+```bash
+# Slot 0: Astro Wing
+sudo dd if=astrowing.a78 of=/dev/rdisk4 bs=512 conv=sync
 
-- **File Extension**: .A78 (uppercase recommended)
-- **Header**: Standard 128-byte .a78 header format
-- **Content**: Compatible with Atari 7800 cartridge formats
-  - 48K ROM (non-bank-switched)
-  - SuperGame bank-switched (up to 256K)
-  - POKEY audio chip support (@$440, $450, $800, $4000)
+# Slot 1: Choplifter (Seek 2048 blocks)
+sudo dd if=Choplifter_NTSC.a78 of=/dev/rdisk4 bs=512 seek=2048 conv=sync
 
-## Hardware Setup
+# Slot 2: ARTI (Seek 4096 blocks)
+sudo dd if=ARTI_Final_digital_edition_jan24_1.1.a78 of=/dev/rdisk4 bs=512 seek=4096 conv=sync
+```
 
-1. Insert formatted microSD card into Tang Nano 9K SD card slot
-2. Power on the FPGA
-3. LEDs will indicate status:
-   - LED[2]: SD card initialized (off=ready)
-   - LED[3]: PSRAM ready (off=ready)
-   - LED[4]: Game load complete (off=done)
-   - LED[5]: Game loaded flag (off=game active)
+### Automated Script
+Use the provided `flash_games.sh` script to automate this process.
 
-## Usage
-
-1. **Boot**: System starts with menu from BRAM
-2. **Navigate**: Use joystick up/down to select game
-3. **Load**: Press fire button to start loading
-4. **Wait**: Background flashes, then game loads from SD to PSRAM
-5. **Play**: System automatically jumps to game at $4000
-
-## Control Registers
-
-The menu uses these FPGA registers:
-
-- **$5000 (write)**: Game select (0-4)
-  - Write game number to trigger loading
-- **$5001 (read)**: Status byte
-  - Bit 0: Loading in progress
-  - Bit 1: Load complete
-  - Bit 2: Load error
-  - Bit 7: PSRAM initialized
+```bash
+chmod +x flash_games.sh
+./flash_games.sh /dev/rdisk4
+```
 
 ## Troubleshooting
-
-### Game Won't Load
-- Check SD card is properly formatted (FAT32)
-- Verify file exists and is named correctly (GAMEX.A78)
-- Check LED indicators for hardware status
-- Ensure .a78 file has valid 128-byte header
 
 ### SD Card Not Detected
 - Try different SD card (some brands have compatibility issues)

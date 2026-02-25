@@ -730,10 +730,10 @@ module top (
     reg crc_scan_req;
     reg [2:0]  crc_burst_count;
 
-    // Game constants (astrowing.a78 = 48KB + 128b Header = 97 Sectors)
-    localparam GAME_SIZE_SECTORS = 97;
+    // Game constants (1MB Slot = 2048 Sectors)
+    localparam GAME_SIZE_SECTORS = 2048;
     
-    reg [6:0] current_sector;
+    reg [10:0] current_sector; // Expanded for 2048 sectors
     
     reg byte_arrived_latched;
 
@@ -873,7 +873,7 @@ module top (
                  
                  SD_NEXT: begin
                      psram_wr_req <= 0;
-                     if (current_sector < 96) begin // 0 to 96 = 97 sectors
+                     if (current_sector < GAME_SIZE_SECTORS - 1) begin 
                           current_sector <= current_sector + 1;
                           sd_state <= SD_START;
                       end else begin
