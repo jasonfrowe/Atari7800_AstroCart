@@ -92,9 +92,27 @@ module top (
     reg [31:0] checksum;
     
     // Hex-to-ASCII converter helper
-    function [7:0] to_hex_ascii (input [3:0] nibble);
-        to_hex_ascii = (nibble < 10) ? (8'h30 + nibble) : (8'h37 + nibble);
-    endfunction
+    wire [7:0] diag_data_out;
+    diag_rom diag_inst (
+        .a_stable(a_stable),
+        .sd_state(sd_state),
+        .byte_index(byte_index),
+        .current_sector(current_sector),
+        .last_byte_captured(last_byte_captured),
+        .checksum(checksum),
+        .psram_checksum(psram_checksum),
+        .latch_p2(latch_p2),
+        .latch_p3(latch_p3),
+        .latch_p4(latch_p4),
+        .latch_p5(latch_p5),
+        .latch_p6(latch_p6),
+        .latch_p7(latch_p7),
+        .fb0(first_bytes[0]),
+        .fb1(first_bytes[1]),
+        .fb2(first_bytes[2]),
+        .fb3(first_bytes[3]),
+        .data_out(diag_data_out)
+    );
 
     // ROM Fetch / PSRAM Read / Status Read
     always @(posedge sys_clk) begin
@@ -104,198 +122,7 @@ module top (
              // data_out <= ip_data_buffer; 
         end else begin
             // --- DIAGNOSTIC ROM OVERRIDE ---
-            // Use $7F00-$7FBF range (all zeros in menu.bin - safe)
-            // Use a_safe[7:4] for nibble-based addressing (0-B = 12 outputs)
-            if (a_stable >= 16'h7F00 && a_stable <= 16'h7FBF) begin
-                // Use a_stable[7:4] to select the diagnostic output (0-B = 12 outputs)
-                case (a_stable[7:4])
-                    4'h0: begin // $x400: SD Word 0 (A9 50 85 3C)
-                        case (a_stable[3:0])
-                            4'h0: data_out <= 8'h53; // 'S'
-                            4'h1: data_out <= 8'h44; // 'D'
-                            4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(first_bytes[0][7:4]);
-                            4'h4: data_out <= to_hex_ascii(first_bytes[0][3:0]);
-                            4'h5: data_out <= 8'h20;
-                            4'h6: data_out <= to_hex_ascii(first_bytes[1][7:4]);
-                            4'h7: data_out <= to_hex_ascii(first_bytes[1][3:0]);
-                            4'h8: data_out <= 8'h20;
-                            4'h9: data_out <= to_hex_ascii(first_bytes[2][7:4]);
-                            4'hA: data_out <= to_hex_ascii(first_bytes[2][3:0]);
-                            4'hB: data_out <= 8'h20;
-                            4'hC: data_out <= to_hex_ascii(first_bytes[3][7:4]);
-                            4'hD: data_out <= to_hex_ascii(first_bytes[3][3:0]);
-                            default: data_out <= 8'h20;
-                        endcase
-                    end
-                    4'h1: begin // $x410: ST/BC
-                        case (a_stable[3:0])
-                            4'h0: data_out <= 8'h53; // 'S'
-                            4'h1: data_out <= 8'h54; // 'T'
-                            4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii({1'b0, sd_state});
-                            4'h4: data_out <= 8'h20; 
-                            4'h5: data_out <= 8'h42; // 'B'
-                            4'h6: data_out <= 8'h43; // 'C'
-                            4'h7: data_out <= 8'h3A;
-                            4'h8: data_out <= to_hex_ascii({2'b0, byte_index[9:8]});
-                            4'h9: data_out <= to_hex_ascii(byte_index[7:4]);
-                            4'hA: data_out <= to_hex_ascii(byte_index[3:0]);
-                            default: data_out <= 8'h20;
-                        endcase
-                    end
-                    4'h2: begin // $x420: SC/L
-                        case (a_stable[3:0])
-                            4'h0: data_out <= 8'h53; // 'S'
-                            4'h1: data_out <= 8'h43; // 'C'
-                            4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii({1'b0, current_sector[6:4]});
-                            4'h4: data_out <= to_hex_ascii(current_sector[3:0]);
-                            4'h5: data_out <= 8'h20;
-                            4'h6: data_out <= 8'h4C; // 'L' (Last Byte)
-                            4'h7: data_out <= 8'h3A;
-                            4'h8: data_out <= to_hex_ascii(last_byte_captured[7:4]);
-                            4'h9: data_out <= to_hex_ascii(last_byte_captured[3:0]);
-                            default: data_out <= 8'h20;
-                        endcase
-                    end
-                    4'h3: begin // $x430: First Bytes Peak
-                        case (a_stable[3:0])
-                            4'h0: data_out <= 8'h48; // 'H'
-                            4'h1: data_out <= 8'h3A; // ':'
-                            4'h2: data_out <= to_hex_ascii(first_bytes[0][7:4]);
-                            4'h3: data_out <= to_hex_ascii(first_bytes[0][3:0]);
-                            4'h4: data_out <= 8'h20;
-                            4'h5: data_out <= to_hex_ascii(first_bytes[1][7:4]);
-                            4'h6: data_out <= to_hex_ascii(first_bytes[1][3:0]);
-                            4'h7: data_out <= 8'h20;
-                            4'h8: data_out <= to_hex_ascii(first_bytes[2][7:4]);
-                            4'h9: data_out <= to_hex_ascii(first_bytes[2][3:0]);
-                            4'hA: data_out <= 8'h20;
-                            4'hB: data_out <= to_hex_ascii(first_bytes[3][7:4]);
-                            4'hC: data_out <= to_hex_ascii(first_bytes[3][3:0]);
-                            default: data_out <= 8'h20;
-                        endcase
-                    end
-                    4'h4: begin // $x440: Checksum (C:XXXXXXXX) - WAS P0
-                        case (a_stable[3:0])
-                            4'h0: data_out <= 8'h43; // 'C'
-                            4'h1: data_out <= 8'h3A; // ':'
-                            4'h2: data_out <= to_hex_ascii(checksum[31:28]);
-                            4'h3: data_out <= to_hex_ascii(checksum[27:24]);
-                            4'h4: data_out <= to_hex_ascii(checksum[23:20]);
-                            4'h5: data_out <= to_hex_ascii(checksum[19:16]); 
-                            4'h6: data_out <= to_hex_ascii(checksum[15:12]);
-                            4'h7: data_out <= to_hex_ascii(checksum[11:8]);
-                            4'h8: data_out <= to_hex_ascii(checksum[7:4]);
-                            4'h9: data_out <= to_hex_ascii(checksum[3:0]);
-                            default: data_out <= 8'h20;
-                        endcase
-                    end
-                    4'h5: begin // $x450: P0:XXXXXXXX (PSRAM Checksum)
-                        case (a_stable[3:0])
-                            4'h0: data_out <= 8'h50; // 'P'
-                            4'h1: data_out <= 8'h30; // '0'
-                            4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(psram_checksum[31:28]);
-                            4'h4: data_out <= to_hex_ascii(psram_checksum[27:24]);
-                            4'h5: data_out <= to_hex_ascii(psram_checksum[23:20]);
-                            4'h6: data_out <= to_hex_ascii(psram_checksum[19:16]);
-                            4'h7: data_out <= to_hex_ascii(psram_checksum[15:12]);
-                            4'h8: data_out <= to_hex_ascii(psram_checksum[11:8]);
-                            4'h9: data_out <= to_hex_ascii(psram_checksum[7:4]);
-                            4'hA: data_out <= to_hex_ascii(psram_checksum[3:0]);
-                            default: data_out <= 8'h20;
-                        endcase
-                    end
-                    4'h6: begin // $x460: P2:XX (crc_burst word 1)
-                        case (a_stable[3:0])
-                            4'h0: data_out <= 8'h50; // 'P'
-                            4'h1: data_out <= 8'h32; // '2'
-                            4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(latch_p2[31:28]);
-                            4'h4: data_out <= to_hex_ascii(latch_p2[27:24]);
-                            4'h5: data_out <= to_hex_ascii(latch_p2[23:20]);
-                            4'h6: data_out <= to_hex_ascii(latch_p2[19:16]);
-                            4'h7: data_out <= to_hex_ascii(latch_p2[15:12]);
-                            4'h8: data_out <= to_hex_ascii(latch_p2[11:8]);
-                            4'h9: data_out <= to_hex_ascii(latch_p2[7:4]);
-                            4'hA: data_out <= to_hex_ascii(latch_p2[3:0]);
-                            default: data_out <= 8'h20;
-                        endcase
-                    end
-                    4'h7: begin // $x470: P3:XX (crc_burst word 2)
-                        case (a_stable[3:0])
-                            4'h0: data_out <= 8'h50; // 'P'
-                            4'h1: data_out <= 8'h33; // '3'
-                            4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(latch_p3[31:28]);
-                            4'h4: data_out <= to_hex_ascii(latch_p3[27:24]);
-                            4'h5: data_out <= to_hex_ascii(latch_p3[23:20]);
-                            4'h6: data_out <= to_hex_ascii(latch_p3[19:16]);
-                            4'h7: data_out <= to_hex_ascii(latch_p3[15:12]);
-                            4'h8: data_out <= to_hex_ascii(latch_p3[11:8]);
-                            4'h9: data_out <= to_hex_ascii(latch_p3[7:4]);
-                            4'hA: data_out <= to_hex_ascii(latch_p3[3:0]);
-                            default: data_out <= 8'h20;
-                        endcase
-                    end
-                    4'h8: begin // $x480: P4:XX (Addr Mid - Dedicated Latch)
-                        case (a_stable[3:0])
-                            4'h0: data_out <= 8'h50; // 'P'
-                            4'h1: data_out <= 8'h34; // '4'
-                            4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(latch_p4[7:4]);
-                            4'h4: data_out <= to_hex_ascii(latch_p4[3:0]);
-                            4'h5: data_out <= 8'h41; // 'A'
-                            4'h6: data_out <= 8'h32; // '2'
-                            default: data_out <= 8'h20;
-                        endcase
-                    end
-                    4'h9: begin // $x490: P5:XX (Burst LSB - Dedicated Latch)
-                        case (a_stable[3:0])
-                            4'h0: data_out <= 8'h50; // 'P'
-                            4'h1: data_out <= 8'h35; // '5'
-                            4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(latch_p5[7:4]);
-                            4'h4: data_out <= to_hex_ascii(latch_p5[3:0]);
-                            4'h5: data_out <= 8'h42; // 'B'
-                            4'h6: data_out <= 8'h30; // '0'
-                            default: data_out <= 8'h20;
-                        endcase
-                    end
-                    4'hA: begin // $x4A0: P6:XX (Load Addr LSB - Dedicated Latch)
-                        case (a_stable[3:0])
-                            4'h0: data_out <= 8'h50; // 'P'
-                            4'h1: data_out <= 8'h36; // '6'
-                            4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(latch_p6[7:4]);
-                            4'h4: data_out <= to_hex_ascii(latch_p6[3:0]);
-                            4'h5: data_out <= 8'h4C; // 'L' (Load)
-                            4'h6: data_out <= 8'h44; // 'D'
-                            default: data_out <= 8'h20;
-                        endcase
-                    end
-                    
-                    4'hB: begin // $x4B0: P7:XX (32-bit Raw Peak - Dedicated Latch)
-                        case (a_stable[3:0])
-                            4'h0: data_out <= 8'h50; // 'P'
-                            4'h1: data_out <= 8'h37; // '7'
-                            4'h2: data_out <= 8'h3A; // ':'
-                            4'h3: data_out <= to_hex_ascii(latch_p7[31:28]);
-                            4'h4: data_out <= to_hex_ascii(latch_p7[27:24]);
-                            4'h5: data_out <= to_hex_ascii(latch_p7[23:20]);
-                            4'h6: data_out <= to_hex_ascii(latch_p7[19:16]);
-                            4'h7: data_out <= to_hex_ascii(latch_p7[15:12]);
-                            4'h8: data_out <= to_hex_ascii(latch_p7[11:8]);
-                            4'h9: data_out <= to_hex_ascii(latch_p7[7:4]);
-                            4'hA: data_out <= to_hex_ascii(latch_p7[3:0]);
-                            default: data_out <= 8'h20;
-                        endcase
-                    end
-                    default: data_out <= 8'h20;
-                endcase
-            end
+            if (a_stable >= 16'h7F00 && a_stable <= 16'h7FBF) data_out <= diag_data_out;
             else if (rom_index < 49152) data_out <= rom_memory[rom_index];
             else data_out <= 8'hFF;
         end
@@ -439,15 +266,8 @@ module top (
     
     reg [7:0] psram_read_latch;
     
-    // --- PSRAM Read Blinker Declarations ---
-    reg state_read;
-    reg [22:0] timer_read;
     reg [15:0] acc_word0; // Reduced to 16-bit for custom controller
     reg [22:0] burst_start_addr; 
-    
-    // --- Direction / Drive Blinker Declarations ---
-    reg state_dir;
-    reg [22:0] timer_dir;
  
     reg write_pending;
     
@@ -979,157 +799,23 @@ module top (
     // ========================================================================
     // 6. DEBUG (Smart Visualizer - Atari Active Gated)
     // ========================================================================
-    // PHI2 Activity Detector: Only enable LED triggers when Atari is running.
     
-    reg phi2_prev;
-    reg atari_active;
-    reg [22:0] activity_timer;
-    
-    localparam ACTIVITY_TIMEOUT = 23'h330000; // ~50ms at 67.5MHz
-    
-    always @(posedge sys_clk) begin
-        phi2_prev <= phi2_safe;
-        
-        // Detect PHI2 edge (rising or falling)
-        if (phi2_safe != phi2_prev) begin
-            atari_active <= 1;
-            activity_timer <= ACTIVITY_TIMEOUT;
-        end else if (activity_timer > 0) begin
-            activity_timer <= activity_timer - 1;
-        end else begin
-            atari_active <= 0;
-        end
-    end
-    
-    // Smart Blinker Logic (Gated by atari_active)
-    reg [22:0] timer_a15;   reg state_a15;
-    reg [22:0] timer_pokey; reg state_pokey;
-    reg [22:0] timer_rw;    reg state_rw;
-    reg [22:0] timer_oe;    reg state_oe;
-    reg [22:0] timer_2200;  reg state_2200;  // $2200 detector
-    
-    reg [24:0] heartbeat;
-
-    localparam BLINK_DUR = 23'h4D0000; // ~75ms at 67.5MHz
-
-    always @(posedge sys_clk) begin
-        heartbeat <= heartbeat + 1;
-
-        // --- A15 Smart Blinker ---
-        if (state_a15) begin
-            if (timer_a15 == 0) begin
-                state_a15 <= 0;
-                timer_a15 <= BLINK_DUR;
-            end else timer_a15 <= timer_a15 - 1;
-        end else begin
-            if (timer_a15 > 0) timer_a15 <= timer_a15 - 1;
-            else if (atari_active && !a_stable[15]) begin // GATED
-                state_a15 <= 1;
-                timer_a15 <= BLINK_DUR;
-            end
-        end
-
-        // --- POKEY Smart Blinker ---
-        if (state_pokey) begin
-            if (timer_pokey == 0) begin
-                state_pokey <= 0;
-                timer_pokey <= BLINK_DUR;
-            end else timer_pokey <= timer_pokey - 1;
-        end else begin
-            if (timer_pokey > 0) timer_pokey <= timer_pokey - 1;
-            else if (atari_active && is_pokey) begin // GATED
-                state_pokey <= 1;
-                timer_pokey <= BLINK_DUR;
-            end
-        end
-
-        // --- RW Smart Blinker ---
-        if (state_rw) begin
-            if (timer_rw == 0) begin
-                state_rw <= 0;
-                timer_rw <= BLINK_DUR;
-            end else timer_rw <= timer_rw - 1;
-        end else begin
-            if (timer_rw > 0) timer_rw <= timer_rw - 1;
-            else if (atari_active && !rw_safe) begin // GATED
-                state_rw <= 1;
-                timer_rw <= BLINK_DUR;
-            end
-        end
-
-        // --- OE Smart Blinker ---
-        if (state_oe) begin
-            if (timer_oe == 0) begin
-                state_oe <= 0;
-                timer_oe <= BLINK_DUR;
-            end else timer_oe <= timer_oe - 1;
-        end else begin
-            if (timer_oe > 0) timer_oe <= timer_oe - 1;
-            else if (atari_active && !buf_oe) begin // GATED
-                state_oe <= 1;
-                timer_oe <= BLINK_DUR;
-            end
-        end
-        
-        // --- $2200 Smart Blinker (Menu Control) ---
-        if (state_2200) begin
-            if (timer_2200 == 0) begin
-                state_2200 <= 0;
-                timer_2200 <= BLINK_DUR;
-            end else timer_2200 <= timer_2200 - 1;
-        end else begin
-            if (timer_2200 > 0) timer_2200 <= timer_2200 - 1;
-            else if (atari_active && is_2200 && !rw_safe) begin // GATED - Write to $2200
-                state_2200 <= 1;
-                timer_2200 <= BLINK_DUR;
-            end
-        end
-    end
-    
-    // --- Direction / Drive Blinker Logic ---
-    // Blink when we switch to Output Mode (DIR=1)
-    always @(posedge sys_clk) begin
-        if (state_dir) begin
-             if (timer_dir == 0) begin
-                 state_dir <= 0;
-                 timer_dir <= BLINK_DUR;
-             end else timer_dir <= timer_dir - 1;
-        end else begin
-             if (timer_dir > 0) timer_dir <= timer_dir - 1;
-             else if (buf_dir == 1'b1) begin // Trigger on OUTPUT direction
-                 state_dir <= 1;
-                 timer_dir <= BLINK_DUR;
-             end
-        end
-    end
-
-    // --- PSRAM Read Blinker Logic ---
-    // Blink when Data is Valid (Read Complete)
-    always @(posedge sys_clk) begin
-        if (state_read) begin
-             if (timer_read == 0) begin
-                 state_read <= 0;
-                 timer_read <= BLINK_DUR;
-             end else timer_read <= timer_read - 1;
-        end else begin
-             if (timer_read > 0) timer_read <= timer_read - 1;
-             else if (!psram_busy && psram_rd_req) begin // Trigger on Read Data Valid
-                 state_read <= 1;
-                 timer_read <= BLINK_DUR;
-             end
-        end
-    end
-
-
-    // LED Assignments (Full Loader Mode)
-    // Active LOW LEDs. 
-    assign led[0] = !pll_lock;      // ON when Locked
-    assign led[1] = game_loaded;    // ON when Game Mode
-    assign led[2] = !phi2_safe;     // ON when PHI2 activity
-    assign led[3] = !state_dir;      // ON when Driving Bus (Output Mode)
-
-    assign led[4] = write_pending;  // ON when Write active
-    assign led[5] = !state_2200;    // ON when Reading (Active Low)
+    smart_blinkers blinkers_inst (
+        .clk(sys_clk),
+        .phi2_safe(phi2_safe),
+        .a_stable(a_stable),
+        .is_pokey(is_pokey),
+        .is_2200(is_2200),
+        .rw_safe(rw_safe),
+        .buf_oe(buf_oe),
+        .buf_dir(buf_dir),
+        .psram_busy(psram_busy),
+        .psram_rd_req(psram_rd_req),
+        .pll_lock(pll_lock),
+        .game_loaded(game_loaded),
+        .write_pending(write_pending),
+        .led(led)
+    );
     
     // --- Oscilloscope Debug Pins ---
     // High-speed 1.8V outputs for accurate timing measurement

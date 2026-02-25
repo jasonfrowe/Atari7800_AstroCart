@@ -172,8 +172,16 @@ flash_loop
  ; Trigger FPGA: write selected game + 128 to $2200
  ; This sets bit 7, allowing FPGA to distinguish from initialization (0).
  ;
- ; fpga_trigger = selected_game + 128
- ; $A5
+ fpga_trigger = selected_game + 128
+
+ ; Wait ~4 seconds (250 frames) for load to finish
+ flash_count = 250
+wait_loop
+ drawscreen
+ flash_count = flash_count - 1
+ if flash_count > 0 then goto wait_loop
+
+ ; Trigger Handover ($A5)
  fpga_trigger = 165
 
  ;
