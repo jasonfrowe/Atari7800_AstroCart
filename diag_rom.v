@@ -54,7 +54,7 @@ module diag_rom (
                     4'h0: data_out = 8'h53; // 'S'
                     4'h1: data_out = 8'h54; // 'T'
                     4'h2: data_out = 8'h3A; // ':'
-                    4'h3: data_out = to_hex_ascii({1'b0, sd_state});
+                    4'h3: data_out = to_hex_ascii(sd_state);
                     4'h4: data_out = 8'h20; 
                     4'h5: data_out = 8'h42; // 'B'
                     4'h6: data_out = 8'h43; // 'C'

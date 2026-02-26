@@ -8,6 +8,7 @@ module cart_loader (
     input [7:0]  d,
     input        rw_safe,
     input        phi2_safe,
+    input        trigger_we,
     
     // SD Card physical interface
     output       sd_cs,
@@ -97,7 +98,12 @@ module cart_loader (
     reg byte_arrived_latched;
     reg [7:0] sd_dout_reg;
     reg [22:0] psram_load_addr;
-    reg phi2_prev;
+    reg [7:0] d_latched;
+    
+    // Address-based data capture logic
+    reg trigger_we_prev;
+    reg trigger_eval;
+    reg [7:0] d_pipe [0:2];
 
     always @(posedge clk_sys) begin
         if (reset) begin
@@ -112,6 +118,10 @@ module cart_loader (
              acc_word0 <= 0;
              write_pending <= 0;
              busy <= 0; // Starts 0 now. Wait for $2200 trigger.
+             
+             trigger_we_prev <= 0;
+             trigger_eval <= 0;
+             
              current_sector <= 0;
              psram_load_addr <= 23'h000000;
              sd_byte_available_d <= 0;
@@ -120,31 +130,48 @@ module cart_loader (
              byte_arrived_latched <= 0;
         end else begin
              sd_byte_available_d <= sd_byte_available;
-             phi2_prev <= phi2_safe;
+             trigger_we_prev <= trigger_we;
 
              if (sd_byte_available && !sd_byte_available_d) 
                  byte_arrived_latched <= 1;
              
              if (psram_wr_req) begin
                   psram_wr_req <= 0;
-             end else if (write_pending && !psram_busy) begin
-                  psram_wr_req <= 1;
-                  write_pending <= 0;
-             end
-            
+              end else if (write_pending && !psram_busy) begin
+                   psram_wr_req <= 1;
+                   write_pending <= 0;
+              end
+             
+              // Keep a history of the unsynchronized data bus 'd'
+              // This is critical because trigger_we is built from a_stable and rw_safe,
+              // which are delayed by top.v synchronizers (~3 cycles). 
+              // By the time trigger_we evaluates or falls, the live 'd' bus has already changed
+              // to the 6502's next instruction cycle!
+              d_pipe[0] <= d;
+              d_pipe[1] <= d_pipe[0];
+              d_pipe[2] <= d_pipe[1];
+              
+              // Only evaluate the trigger command once the write pulse ENDS,
+              // but grab the data from back in time when it was actually stable on the bus!
+              if (trigger_we_prev && !trigger_we) begin
+                  // Using d_pipe[2] grabs the data from exactly 3 sys_clk ticks ago (~37ns),
+                  // properly aligning with the end of the delayed write cycle.
+                  d_latched <= d_pipe[2];
+                  trigger_eval <= 1;
+              end else begin
+                  trigger_eval <= 0;
+              end
+             
             case (sd_state)
                 SD_IDLE: begin
                     // TRIGGER: Only latch command when the SD controller is initialized and ready.
-                    // This prevents transient values on the data bus during Atari power-on
-                    // from spuriously triggering a load sequence before the SD card is ready.
-                    // CRITICAL: We MUST sample on the FALLING EDGE of phi2, because the 6502
-                    // data bus is only guaranteed to be fully stable and valid at the end of the pulse.
-                    if (a_stable == 16'h2200 && !rw_safe && !phi2_safe && phi2_prev && sd_ready) begin
+                    // Act purely on the transition edge of the write cycle to ignore noisy intermediate states.
+                    if (trigger_eval && sd_ready) begin
                         
-                        if (!game_loaded && (d >= 8'h80 && d <= 8'h8F)) begin
+                        if (!game_loaded && (d_latched >= 8'h80 && d_latched <= 8'h8F)) begin
                             // The payload is the game index
                             // current_sector maps to Start_Block = 1 + (game_idx * 100)
-                            sd_address <= 1 + ((d & 8'h7F) * 100); 
+                            sd_address <= 1 + ((d_latched & 8'h7F) * 100); 
                             current_sector <= 0;
                             
                             sd_state <= SD_START;
@@ -152,7 +179,7 @@ module cart_loader (
                             checksum <= 0;
                             psram_load_addr <= 0;
                         end
-                        else if (d == 8'h5A) begin
+                        else if (d_latched == 8'h5A) begin
                              // RELOAD: Magic Key 0x5A
                              sd_address <= 1; // Default to Game 0
                              sd_state <= SD_START;
@@ -164,7 +191,7 @@ module cart_loader (
                              switch_pending <= 0;
                         end
                         // Add catch for $64 (100) soft-reload as well for joystick shortcut
-                        else if (d == 8'h40) begin
+                        else if (d_latched == 8'h40) begin
                              sd_address <= 1; // Default to Game 0
                              sd_state <= SD_START;
                              current_sector <= 0;
@@ -283,11 +310,20 @@ module cart_loader (
                   end
                  
                  SD_COMPLETE: begin
-                     if (a_stable == 16'h2200 && !rw_safe && !phi2_safe && phi2_prev) begin
-                         if (!game_loaded && d == 8'hA5) begin
+                     if (trigger_eval) begin
+                         if (!game_loaded && d_latched == 8'hA5) begin
                              switch_pending <= 1;
                          end
-                         else if (d == 8'h5A) begin
+                         else if (!game_loaded && (d_latched >= 8'h80 && d_latched <= 8'h8F)) begin
+                             // User selected a new game from the menu! Re-trigger load.
+                             sd_address <= 1 + ((d_latched & 8'h7F) * 100); 
+                             current_sector <= 0;
+                             sd_state <= SD_START;
+                             busy <= 1;
+                             checksum <= 0;
+                             psram_load_addr <= 0;
+                         end
+                         else if (d_latched == 8'h5A) begin
                              sd_state <= SD_START;
                              current_sector <= 0;
                              psram_load_addr <= 23'h000000;

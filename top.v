@@ -83,7 +83,7 @@ module top (
     // Handover Registers
     reg busy;
     reg armed;
-    reg [3:0] sd_state; // Moved up for visibility
+    wire [3:0] sd_state; // Moved up for visibility
     
     // Status Byte: 0x00=Busy (Loading), 0x80=Done/Ready
     wire [7:0] status_byte = busy ? 8'h00 : 8'h80;
@@ -242,7 +242,7 @@ module top (
     
     // PSRAM Signals - original interface
     reg psram_rd_req;
-    reg psram_wr_req;
+    wire psram_wr_req;
     wire [15:0] psram_dout_16;
     
     // PSRAM Interface Signals
@@ -275,7 +275,7 @@ module top (
     // [FIX 2] Simplified Address Mux
     // P2(Diag2), P3(Diag3), P7(Diag6) ALL READ ADDRESS 0
     // V62: Use LATCHED write address for IP to avoid race with loop increment
-    reg [22:0] psram_write_addr_latched;
+    wire [22:0] psram_write_addr_latched;
     
     wire [21:0] psram_addr_mux = (game_loaded)   ? {6'b0, a_stable} - 22'h004000 : 
                                  (is_psram_diag0) ? 22'h000000 : 
@@ -288,7 +288,7 @@ module top (
     
     reg [7:0] psram_read_latch;
     
-    reg [15:0] acc_word0; // Reduced to 16-bit for custom controller
+    wire [15:0] acc_word0; // Reduced to 16-bit for custom controller
     reg [22:0] burst_start_addr; 
  
     reg write_pending;
@@ -350,8 +350,8 @@ module top (
     wire in_any_diag = is_psram_diag0 || is_psram_diag1 || is_psram_diag2 || is_psram_diag3 ||
                        is_psram_diag4 || is_psram_diag5 || is_psram_diag6 || is_psram_diag7;
     
-    // Only trigger read once per entry to diagnostic region
-    wire diag_read_trigger = !game_loaded && rw_safe && 
+    // Only trigger read once per entry to diagnostic region AND only when cart_loader is NOT busy
+    wire diag_read_trigger = !game_loaded && rw_safe && !busy && 
                             ((is_psram_diag0 && !diag0_read_done) ||
                              (is_psram_diag1 && !diag1_read_done) ||
                              (is_psram_diag2 && !diag2_read_done) ||
@@ -492,6 +492,7 @@ module top (
         .d(d),
         .rw_safe(rw_safe),
         .phi2_safe(phi2_safe),
+        .trigger_we(trigger_we),
         
         .sd_cs(sd_cs),
         .sd_mosi(sd_mosi),
