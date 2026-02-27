@@ -29,6 +29,15 @@ def write_game_to_blocks(sd_device, game_file, game_number):
     # Read game file
     with open(game_file, 'rb') as f:
         game_data = f.read()
+        
+    # [FPGA FIX] Pad the 128-byte A78 header to a full 512-byte block.
+    # This ensures the actual ROM payload starts perfectly aligned at the beginning 
+    # of the very next SD card block (Block N+1), drastically simplifying the FPGA loader!
+    if len(game_data) > 128:
+        header = game_data[:128]
+        payload = game_data[128:]
+        padded_header = header + (b'\x00' * 384)
+        game_data = padded_header + payload
     
     game_size = len(game_data)
     blocks_needed = (game_size + BLOCK_SIZE - 1) // BLOCK_SIZE

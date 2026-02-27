@@ -101,7 +101,7 @@ module top (
     
     wire [31:0] latch_p2;
     wire [31:0] latch_p3;
-    wire [31:0] latch_p4 = {24'b0, psram_write_addr_latched[15:8]}; // P4 is mid address
+    wire [7:0]  latch_p4 = psram_write_addr_latched[15:8]; // P4 is mid address
     wire [7:0]  latch_p5;
     wire [7:0]  latch_p6;
     wire [31:0] latch_p7;
@@ -247,11 +247,25 @@ module top (
     
     // PSRAM Interface Signals
     wire [7:0] psram_dout = psram_cmd_addr[0] ? psram_dout_16[15:8] : psram_dout_16[7:0];
-    wire psram_busy;
     
-    // Bridge logic to controller interface
-    wire psram_cmd_valid = psram_rd_req || psram_wr_req;
-    wire psram_cmd_write = psram_wr_req;
+    // --- Clock Domain Crossing (CDC) ---
+    // Synchronize 27MHz Requests -> 81MHz Pulses
+    reg [2:0] wr_req_sync;
+    reg [2:0] rd_req_sync;
+    always @(posedge clk_81m) begin
+         wr_req_sync <= {wr_req_sync[1:0], psram_wr_req};
+         rd_req_sync <= {rd_req_sync[1:0], psram_rd_req};
+    end
+    wire psram_cmd_write = (wr_req_sync[2:1] == 2'b01); // Clean 1-cycle 81MHz pulse
+    wire psram_cmd_read  = (rd_req_sync[2:1] == 2'b01);
+    
+    // Synchronize 81MHz Busy -> 27MHz Safe Level
+    wire psram_busy_raw;
+    reg [1:0] psram_busy_sync;
+    always @(posedge sys_clk) begin
+         psram_busy_sync <= {psram_busy_sync[0], psram_busy_raw};
+    end
+    wire psram_busy = psram_busy_sync[1];
     
     // [FIX 4] Latch Address for IP Stability
     // We cannot drive IP address directly from 'a_safe' via MUX because 'a_safe' changes
@@ -303,13 +317,13 @@ module top (
         .clk(clk_81m),
         .clk_p(clk_81m_shifted),
         .resetn(pll_lock),
-        .read(psram_rd_req),
-        .write(psram_wr_req),
+        .read(psram_cmd_read),    // Use 81MHz Synchronized Pulse
+        .write(psram_cmd_write),  // Use 81MHz Synchronized Pulse
         .addr(psram_cmd_addr[21:0]),
         .din(acc_word0[15:0]),
         .byte_write(1'b0),
         .dout(psram_dout_16),
-        .busy(psram_busy),
+        .busy(psram_busy_raw),    // Raw 81MHz output to be synchronized down to 27MHz
         .O_psram_ck(O_psram_ck),
         .O_psram_ck_n(O_psram_ck_n),
         .O_psram_cs_n(O_psram_cs_n),

@@ -94,8 +94,6 @@ module cart_loader (
     localparam SD_CRC_WAIT   = 7;
     localparam SD_CRC_NEXT   = 8;
 
-    reg sd_byte_available_d;
-    reg byte_arrived_latched;
     reg [7:0] sd_dout_reg;
     reg [22:0] psram_load_addr;
     reg [7:0] d_latched;
@@ -103,6 +101,7 @@ module cart_loader (
     // Address-based data capture logic
     reg trigger_we_prev;
     reg trigger_eval;
+    reg trigger_lock_active;
     reg [7:0] d_pipe [0:2];
 
     always @(posedge clk_sys) begin
@@ -121,19 +120,14 @@ module cart_loader (
              
              trigger_we_prev <= 0;
              trigger_eval <= 0;
+             trigger_lock_active <= 0;
              
              current_sector <= 0;
              psram_load_addr <= 23'h000000;
-             sd_byte_available_d <= 0;
              checksum <= 0;
              sd_dout_reg <= 0;
-             byte_arrived_latched <= 0;
         end else begin
-             sd_byte_available_d <= sd_byte_available;
              trigger_we_prev <= trigger_we;
-
-             if (sd_byte_available && !sd_byte_available_d) 
-                 byte_arrived_latched <= 1;
              
              if (psram_wr_req) begin
                   psram_wr_req <= 0;
@@ -203,36 +197,41 @@ module cart_loader (
                         end
                     end
                 end
-                
-                SD_START: begin
-                    sd_rd <= 1;
-                    byte_index <= 0;
-                    sd_state <= SD_WAIT;
-                end
-                
-                SD_WAIT: begin
-                     sd_rd <= !write_pending;
+                                 SD_START: begin
+                     psram_wr_req <= 0;
+                     if (sd_ready) begin
+                         sd_rd <= 1; // Assert RD to kick off block load
+                     end
+                     else if (sd_rd) begin
+                         sd_rd <= 0; // sd_ready went low, it heard us!
+                         byte_index <= 0;
+                         sd_state <= SD_WAIT;
+                     end
+                 end
+                 
+                 SD_WAIT: begin
+                     // 4-Phase Handshake Drop:
+                     if (sd_rd && !sd_byte_available) begin
+                         sd_rd <= 0; // Drop ACK when we see it was received 
+                     end
                      
-                     if (byte_arrived_latched && !write_pending) begin
-                         sd_dout_reg <= sd_dout;
-                         byte_arrived_latched <= 0; 
-                         sd_state <= SD_DATA;
-                     end else if (byte_index >= 512 && !write_pending) begin
-                         sd_state <= SD_NEXT;
-                     end else if (sd_ready && byte_index > 0 && !write_pending) begin
+                     if (sd_byte_available && !sd_rd && !write_pending) begin
+                         sd_dout_reg <= sd_dout;     // Capture Data
+                         sd_rd <= 1;                 // Assert ACK
+                         sd_state <= SD_DATA;        // Handle PSRAM Write
+                     end else if (!sd_byte_available && !sd_rd && byte_index >= 512 && !write_pending) begin
                          sd_state <= SD_NEXT;
                      end
                  end
                   
                   SD_DATA: begin
-                         if (current_sector > 0 || byte_index >= 128) begin
+                         if (current_sector > 0) begin
+                             // Handle Payload Sectors (Sector > 0)
                              if (psram_load_addr[0] == 0) acc_word0[7:0] <= sd_dout_reg;
                              else acc_word0[15:8] <= sd_dout_reg;
-                         end
-                         
-                         if (current_sector > 0 || byte_index >= 128) begin
-                          // Trigger Write on ODD byte
-                          if (psram_load_addr[0] == 1'b1) begin
+                             
+                             // Trigger Write on ODD byte
+                             if (psram_load_addr[0] == 1'b1) begin
                                   write_pending <= 1;
                                   psram_write_addr_latched <= {psram_load_addr[22:1], 1'b0};
                              end
@@ -240,12 +239,13 @@ module cart_loader (
                              checksum <= checksum + sd_dout_reg;
                              last_byte_captured <= sd_dout_reg;
                              
-                             if (current_sector == 0) begin
-                                 if (byte_index == 128) fb0 <= sd_dout_reg;
-                                 else if (byte_index == 129) fb1 <= sd_dout_reg;
-                                 else if (byte_index == 130) fb2 <= sd_dout_reg;
-                                 else if (byte_index == 131) fb3 <= sd_dout_reg;
+                             if (current_sector == 1) begin
+                                 if (byte_index == 0) fb0 <= sd_dout_reg;
+                                 else if (byte_index == 1) fb1 <= sd_dout_reg;
+                                 else if (byte_index == 2) fb2 <= sd_dout_reg;
+                                 else if (byte_index == 3) fb3 <= sd_dout_reg;
                              end
+                             
                              psram_load_addr <= psram_load_addr + 1; 
                          end
                          
@@ -314,7 +314,7 @@ module cart_loader (
                          if (!game_loaded && d_latched == 8'hA5) begin
                              switch_pending <= 1;
                          end
-                         else if (!game_loaded && (d_latched >= 8'h80 && d_latched <= 8'h8F)) begin
+                         else if (!game_loaded && (d_latched >= 8'h80 && d_latched <= 8'h8F) && !trigger_lock_active) begin
                              // User selected a new game from the menu! Re-trigger load.
                              sd_address <= 1 + ((d_latched & 8'h7F) * 100); 
                              current_sector <= 0;
@@ -322,6 +322,7 @@ module cart_loader (
                              busy <= 1;
                              checksum <= 0;
                              psram_load_addr <= 0;
+                             trigger_lock_active <= 1; // Prevent continuous reloading!
                          end
                          else if (d_latched == 8'h5A) begin
                              sd_state <= SD_START;
@@ -340,6 +341,10 @@ module cart_loader (
                      end
                  end
              endcase
+             
+             // Unlock trigger only when the menu clears the trigger byte (e.g. to 0)
+             if (d_latched == 0) trigger_lock_active <= 0;
+             
         end
     end
 

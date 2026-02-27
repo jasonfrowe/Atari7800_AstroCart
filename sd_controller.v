@@ -207,6 +207,7 @@ module sd_controller(
                     end
                 end
                 IDLE: begin
+                    byte_available <= 0;
                     if(rd == 1) begin
                         state <= READ_BLOCK;
                     end
