@@ -114,6 +114,11 @@ module top (
     wire game_loaded;
     wire switch_pending;
     
+    // BRAM Write Interface from Loader
+    wire bram_we;
+    wire [15:0] bram_addr;
+    wire [7:0] bram_data;
+    
     // Hex-to-ASCII converter helper
     wire [7:0] diag_data_out;
     diag_rom diag_inst (
@@ -139,6 +144,12 @@ module top (
 
     // ROM Fetch / PSRAM Read / Status Read
     always @(posedge sys_clk) begin
+        // Allow Loader to write to Menu RAM (BRAM) during header scan
+        if (bram_we) begin
+            // Map $6000-$6FFF to ROM index (Offset $2000)
+            if (bram_addr >= 16'h4000) rom_memory[bram_addr - 16'h4000] <= bram_data;
+        end
+        
         if (game_loaded) begin
              // [OPTIMIZATION] Fast Data Capture: Bypass synced latch entirely
              // Data connects directly combinationally to the FPGA pins from ip_data_buffer
@@ -531,7 +542,11 @@ module top (
         .fb3(first_bytes_3),
         
         .busy(busy),
-        .write_pending(write_pending_loader)
+        .write_pending(write_pending_loader),
+        
+        .bram_we(bram_we),
+        .bram_addr(bram_addr),
+        .bram_data(bram_data)
     );
     
     always @* write_pending = write_pending_loader;

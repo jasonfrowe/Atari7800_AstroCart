@@ -76,11 +76,17 @@ draw_game_list
  ;
  ; Display available games
  ;
- plotchars 'ASTRO WING'       0 10 4
- plotchars 'DONKEY KONG'       0 10 6
- plotchars 'GALAGA'           0 10 8
- plotchars 'MS PAC-MAN'       0 10 10
- plotchars 'DEFENDER'         0 10 12
+ ; plotchars 'ASTRO WING'       0 10 4
+ ; plotchars 'DONKEY KONG'       0 10 6
+ ; plotchars 'GALAGA'           0 10 8
+ ; plotchars 'MS PAC-MAN'       0 10 10
+ ; plotchars 'DEFENDER'         0 10 12
+  plotchars $6000 0 10 4
+  plotchars $6020 0 10 5
+  plotchars $6040 0 10 6
+  plotchars $6060 0 10 7
+  plotchars $6080 0 10 8
+
  return
 
 draw_hud

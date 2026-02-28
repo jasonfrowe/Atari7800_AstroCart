@@ -48,6 +48,11 @@ module cart_loader (
     // Flags
     output reg busy,
     output reg write_pending // passed to smart_blinkers
+    ,
+    // BRAM Write Interface (for Menu Building)
+    output reg bram_we,
+    output reg [15:0] bram_addr,
+    output reg [7:0] bram_data
 );
 
     // SD Controller signals
@@ -94,6 +99,11 @@ module cart_loader (
     localparam SD_CRC_WAIT   = 7;
     localparam SD_CRC_NEXT   = 8;
     localparam SD_DRAIN      = 9; // [FIX] Wait for last write to finish
+    
+    localparam SD_SCAN_START = 10;
+    localparam SD_SCAN_WAIT  = 11;
+    localparam SD_SCAN_DATA  = 12;
+    localparam SD_SCAN_NEXT  = 13;
 
     reg [7:0] sd_dout_reg;
     reg [22:0] psram_load_addr;
@@ -105,10 +115,12 @@ module cart_loader (
     reg trigger_lock_active;
     reg [7:0] drain_timer;
     reg [7:0] d_pipe [0:2];
+    
+    reg [4:0] scan_game_idx; // Scan up to 32 games
 
     always @(posedge clk_sys) begin
         if (reset) begin
-             sd_state <= SD_IDLE;
+             sd_state <= SD_SCAN_START; // Start by scanning headers
              sd_rd <= 0;
              sd_address <= 0;
              byte_index <= 0;
@@ -118,7 +130,7 @@ module cart_loader (
              crc_scan_req <= 0;
              acc_word0 <= 0;
              write_pending <= 0;
-             busy <= 0; // Starts 0 now. Wait for $2200 trigger.
+             busy <= 1; // [FIX] Busy during initial scan
              
              trigger_we_prev <= 0;
              trigger_eval <= 0;
@@ -129,6 +141,11 @@ module cart_loader (
              checksum <= 0;
              sd_dout_reg <= 0;
              drain_timer <= 0;
+             
+             scan_game_idx <= 0;
+             bram_we <= 0;
+             bram_addr <= 0;
+             bram_data <= 0;
         end else begin
              trigger_we_prev <= trigger_we;
              
@@ -161,6 +178,7 @@ module cart_loader (
               end
              
             case (sd_state)
+                // --- NORMAL OPERATION ---
                 SD_IDLE: begin
                     // TRIGGER: Only latch command when the SD controller is initialized and ready.
                     // Act purely on the transition edge of the write cycle to ignore noisy intermediate states.
@@ -225,6 +243,8 @@ module cart_loader (
                          sd_state <= SD_DATA;        // Handle PSRAM Write
                      end else if (!sd_byte_available && !sd_rd && byte_index >= 512 && !write_pending) begin
                          sd_state <= SD_NEXT;
+                     end else if (sd_ready && !sd_rd && byte_index < 512) begin
+                         sd_state <= SD_NEXT; // Abort on read error
                      end
                  end
                   
@@ -316,7 +336,7 @@ module cart_loader (
                   end
                   
                   SD_CRC_NEXT: begin
-                      if (crc_address < 23'h00BFFE) begin 
+                      if (crc_address < 23'h03FFFE) begin // [FIX] Scan full 256KB
                           crc_address <= crc_address + 2; 
                           sd_state <= SD_CRC_START;
                       end else begin
@@ -328,6 +348,7 @@ module cart_loader (
                  
                  SD_COMPLETE: begin
                      busy <= 0; // [FIX] Ensure busy is released to prevent address bus contention
+                     crc_scan_req <= 0; // [FIX] Ensure CRC request is dropped
                      if (trigger_eval) begin
                          if (!game_loaded && d_latched == 8'hA5) begin
                              switch_pending <= 1;
@@ -356,23 +377,66 @@ module cart_loader (
                      if (switch_pending && a_stable == 16'hFFFC) begin
                          game_loaded <= 1;
                          switch_pending <= 0;
-                         
-                         // [FIX] Clear all diagnostics to prevent noise/artifacts during gameplay
-                         checksum <= 0;
-                         psram_checksum <= 0;
-                         latch_p2 <= 0;
-                         latch_p3 <= 0;
-                         latch_p5 <= 0;
-                         latch_p6 <= 0;
-                         latch_p7 <= 0;
-                         fb0 <= 0; fb1 <= 0; fb2 <= 0; fb3 <= 0;
-                         byte_index <= 0;
-                         current_sector <= 0;
-                         last_byte_captured <= 0;
-                         psram_write_addr_latched <= 0; // Clears P4
-                         sd_state <= SD_IDLE;
                      end
                  end
+                 
+                 // --- HEADER SCANNING (METADATA) ---
+                 SD_SCAN_START: begin
+                     // Read Block 1 + (Index * 1024)
+                     sd_address <= 1 + (scan_game_idx * 1024);
+                     byte_index <= 0;
+                     bram_we <= 0;
+                     
+                     if (sd_ready) begin
+                         sd_rd <= 1;
+                     end
+                     else if (sd_rd) begin
+                         sd_rd <= 0;
+                         sd_state <= SD_SCAN_WAIT;
+                     end
+                 end
+                 
+                 SD_SCAN_WAIT: begin
+                     bram_we <= 0; // Pulse low
+                     if (sd_rd && !sd_byte_available) sd_rd <= 0;
+                     
+                     if (sd_byte_available && !sd_rd) begin
+                         sd_dout_reg <= sd_dout;
+                         sd_rd <= 1;
+                         sd_state <= SD_SCAN_DATA;
+                     end else if (!sd_byte_available && !sd_rd && byte_index >= 512) begin
+                         sd_state <= SD_SCAN_NEXT;
+                     end else if (sd_ready && !sd_rd && byte_index < 512) begin
+                         // [FIX] Abort if controller goes IDLE prematurely (timeout/error)
+                         sd_state <= SD_SCAN_NEXT;
+                     end
+                 end
+                 
+                 SD_SCAN_DATA: begin
+                     // Extract Title (Bytes 17-48)
+                     // Map to BRAM $6000 + (GameIdx * 32) + CharIdx
+                     if (byte_index >= 17 && byte_index <= 48) begin
+                         bram_we <= 1;
+                         bram_data <= sd_dout_reg;
+                         // Base $6000 + Offset
+                         bram_addr <= 16'h6000 + (scan_game_idx * 32) + (byte_index - 17);
+                     end
+                     
+                     byte_index <= byte_index + 1;
+                     sd_state <= SD_SCAN_WAIT;
+                 end
+                 
+                 SD_SCAN_NEXT: begin
+                     if (scan_game_idx < 15) begin // Scan first 16 games
+                         scan_game_idx <= scan_game_idx + 1;
+                         sd_state <= SD_SCAN_START;
+                     end else begin
+                         // Done scanning
+                         sd_state <= SD_IDLE;
+                         busy <= 0;
+                     end
+                 end
+                 
              endcase
              
              // Unlock trigger only when the menu clears the trigger byte (e.g. to 0)
