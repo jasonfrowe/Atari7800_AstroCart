@@ -93,6 +93,7 @@ module cart_loader (
     localparam SD_CRC_START  = 6;
     localparam SD_CRC_WAIT   = 7;
     localparam SD_CRC_NEXT   = 8;
+    localparam SD_DRAIN      = 9; // [FIX] Wait for last write to finish
 
     reg [7:0] sd_dout_reg;
     reg [22:0] psram_load_addr;
@@ -102,6 +103,7 @@ module cart_loader (
     reg trigger_we_prev;
     reg trigger_eval;
     reg trigger_lock_active;
+    reg [7:0] drain_timer;
     reg [7:0] d_pipe [0:2];
 
     always @(posedge clk_sys) begin
@@ -126,6 +128,7 @@ module cart_loader (
              psram_load_addr <= 23'h000000;
              checksum <= 0;
              sd_dout_reg <= 0;
+             drain_timer <= 0;
         end else begin
              trigger_we_prev <= trigger_we;
              
@@ -260,10 +263,18 @@ module cart_loader (
                           sd_address <= sd_address + 1; // Advance true SD Block Address
                           sd_state <= SD_START;
                       end else begin
-                          sd_state <= SD_CRC_START;
+                          sd_state <= SD_DRAIN; // [FIX] Go to drain state instead of CRC start
                           crc_address <= 23'h000000;
                           psram_checksum <= 0;
+                          drain_timer <= 0;
                       end
+                  end
+
+                  SD_DRAIN: begin
+                      // Wait ~400ns (32 cycles @ 81MHz) to ensure last write is fully committed
+                      drain_timer <= drain_timer + 1;
+                      if (drain_timer == 32) 
+                          sd_state <= SD_CRC_START;
                   end
                   
                   SD_CRC_START: begin

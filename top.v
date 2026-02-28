@@ -292,6 +292,7 @@ module top (
     wire [22:0] psram_write_addr_latched;
     
     wire [21:0] psram_addr_mux = (game_loaded)   ? {6'b0, a_stable} - 22'h004000 : 
+                                 (busy)          ? {psram_write_addr_latched[21:0]} : // [FIX] Priority for loader
                                  (is_psram_diag0) ? 22'h000000 : 
                                  (is_psram_diag1) ? 22'h000001 : 
                                  (is_psram_diag2) ? 22'h000000 : 

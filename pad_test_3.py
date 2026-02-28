@@ -4,7 +4,7 @@ with open("astrowing.a78", "rb") as f:
 payload = d[128:]
 print("Full Payload Sum:", hex(sum(payload)))
 
-target_p0 = 0x003C7D58
+target_p0 = 0x003C75F8
 print("Target P0:", hex(target_p0))
 print("Diff:", hex(sum(payload) - target_p0))
 
