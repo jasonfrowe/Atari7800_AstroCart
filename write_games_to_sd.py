@@ -18,7 +18,7 @@ import os
 import struct
 
 BLOCK_SIZE = 512
-BLOCKS_PER_GAME = 100
+BLOCKS_PER_GAME = 1024
 
 def write_game_to_blocks(sd_device, game_file, game_number):
     """Write a game file to specific SD card blocks."""

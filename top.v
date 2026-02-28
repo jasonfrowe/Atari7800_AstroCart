@@ -92,7 +92,7 @@ module top (
 
     // Diagnostics Wires from Cart Loader
     wire [9:0] byte_index;
-    wire [6:0] current_sector;
+    wire [9:0] current_sector;
     wire [7:0] last_byte_captured;
     wire [31:0] checksum;
     wire [31:0] psram_checksum;

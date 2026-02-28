@@ -4,7 +4,7 @@ module diag_rom (
     // SD / State inputs
     input [3:0] sd_state,
     input [9:0] byte_index,
-    input [6:0] current_sector,
+    input [9:0] current_sector,
     input [7:0] last_byte_captured,
     input [31:0] checksum,
     input [31:0] psram_checksum,

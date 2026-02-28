@@ -27,7 +27,7 @@ module cart_loader (
     output reg   game_loaded,
     output reg   switch_pending,
     output reg [3:0] sd_state,
-    output reg [6:0] current_sector,
+    output reg [9:0] current_sector,
     output reg [9:0] byte_index,
     output reg [31:0] checksum,
     output reg [7:0] last_byte_captured,
@@ -168,8 +168,8 @@ module cart_loader (
                         
                         if (!game_loaded && (d_latched >= 8'h80 && d_latched <= 8'h8F)) begin
                             // The payload is the game index
-                            // current_sector maps to Start_Block = 1 + (game_idx * 100)
-                            sd_address <= 1 + ((d_latched & 8'h7F) * 100); 
+                            // current_sector maps to Start_Block = 1 + (game_idx * 1024)
+                            sd_address <= 1 + ((d_latched & 8'h7F) * 1024); 
                             current_sector <= 0;
                             
                             sd_state <= SD_START;
@@ -259,7 +259,7 @@ module cart_loader (
 
                  SD_NEXT: begin
                      psram_wr_req <= 0;
-                     if (current_sector < 96) begin // 97 sectors total per game
+                     if (current_sector < 512) begin // 256KB total per game
                           current_sector <= current_sector + 1;
                           sd_address <= sd_address + 1; // Advance true SD Block Address
                           sd_state <= SD_START;
@@ -334,7 +334,7 @@ module cart_loader (
                          end
                          else if (!game_loaded && (d_latched >= 8'h80 && d_latched <= 8'h8F) && !trigger_lock_active) begin
                              // User selected a new game from the menu! Re-trigger load.
-                             sd_address <= 1 + ((d_latched & 8'h7F) * 100); 
+                             sd_address <= 1 + ((d_latched & 8'h7F) * 1024); 
                              current_sector <= 0;
                              sd_state <= SD_START;
                              busy <= 1;

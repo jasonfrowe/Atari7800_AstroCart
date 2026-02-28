@@ -298,7 +298,7 @@ module game_loader (
                         // Calculate SD card block address for selected game
                         // Assuming games are stored sequentially
                         // Block 0 = directory, Blocks 1+ = games
-                        sd_block_addr <= 32'd1 + (game_select * 32'd100); // 100 blocks per game max
+                        sd_block_addr <= 32'd1 + (game_select * 32'd1024); // 1024 blocks per game max
                         byte_counter <= 0;
                         write_addr <= 0;
                         state <= READ_HEADER;
