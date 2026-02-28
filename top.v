@@ -146,6 +146,7 @@ module top (
         end else begin
             // --- DIAGNOSTIC ROM OVERRIDE ---
             if (a_stable >= 16'h7F00 && a_stable <= 16'h7FBF) data_out <= diag_data_out;
+            else if (a_stable == 16'h7FF0) data_out <= status_byte; // [NEW] Polling Address for Menu
             else if (rom_index < 49152) data_out <= rom_memory[rom_index];
             else data_out <= 8'hFF;
         end

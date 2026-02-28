@@ -174,22 +174,17 @@ flash_loop
  ;
  fpga_trigger = selected_game + 128
 
- ; Wait ~4 seconds (250 frames) for load to finish
- flash_count = 250
+ ; Wait for load to finish (poll $7FF0)
 wait_loop
  restorescreen
  gosub draw_hud
  drawscreen
- flash_count = flash_count - 1
- if flash_count > 0 then goto wait_loop
-
- ; Trigger Handover ($A5)
- fpga_trigger = 165
-
- ;
- ; For now, just loop (later we'll add game loading)
- ;
- ; Handover to FPGA: Jump to Reset Vector
  asm
+   lda $7FF0
+   bpl .keep_waiting
+   lda #$A5
+   sta $2200
    jmp ($FFFC)
+.keep_waiting
 end
+ goto wait_loop
