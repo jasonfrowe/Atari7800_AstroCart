@@ -86,6 +86,10 @@ draw_game_list
   plotchars $6040 0 10 6
   plotchars $6060 0 10 7
   plotchars $6080 0 10 8
+  plotchars $60A0 0 10 9
+  plotchars $60C0 0 10 10
+  plotchars $60E0 0 10 11
+  plotchars $6100 0 10 12
 
  return
 
@@ -112,19 +116,19 @@ draw_cursor
  ; Clear all cursor positions first
  ;
  plotchars ' ' 0 0 4
+ plotchars ' ' 0 0 5
  plotchars ' ' 0 0 6
+ plotchars ' ' 0 0 7
  plotchars ' ' 0 0 8
+ plotchars ' ' 0 0 9
  plotchars ' ' 0 0 10
+ plotchars ' ' 0 0 11
  plotchars ' ' 0 0 12
- plotchars ' ' 0 0 14
- plotchars ' ' 0 0 15
- plotchars ' ' 0 0 16
- plotchars ' ' 0 0 17
  
  ;
  ; Calculate and draw cursor at current selection
  ;
- temp_y = selected_game * 2 + 4
+ temp_y = selected_game * 1 + 4
  plotchars '>' 0 0 temp_y
  return
 
