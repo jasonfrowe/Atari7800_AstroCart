@@ -246,23 +246,13 @@ module top (
     wire [7:0] psram_dout = psram_cmd_addr[0] ? psram_dout_16[15:8] : psram_dout_16[7:0];
     
     // --- Clock Domain Crossing (CDC) ---
-    // Synchronize 27MHz Requests -> 81MHz Pulses
-    reg [2:0] wr_req_sync;
-    reg [2:0] rd_req_sync;
-    always @(posedge clk_81m) begin
-         wr_req_sync <= {wr_req_sync[1:0], psram_wr_req};
-         rd_req_sync <= {rd_req_sync[1:0], psram_rd_req};
-    end
-    wire psram_cmd_write = (wr_req_sync[2:1] == 2'b01); // Clean 1-cycle 81MHz pulse
-    wire psram_cmd_read  = (rd_req_sync[2:1] == 2'b01);
+    // [OPTIMIZATION] Removed CDC logic as sys_clk is now 81MHz (same as PSRAM)
+    wire psram_cmd_write = psram_wr_req;
+    wire psram_cmd_read  = psram_rd_req;
     
     // Synchronize 81MHz Busy -> 27MHz Safe Level
     wire psram_busy_raw;
-    reg [1:0] psram_busy_sync;
-    always @(posedge sys_clk) begin
-         psram_busy_sync <= {psram_busy_sync[0], psram_busy_raw};
-    end
-    wire psram_busy = psram_busy_sync[1];
+    wire psram_busy = psram_busy_raw;
     
     // [FIX 4] Latch Address for IP Stability
     // We cannot drive IP address directly from 'a_safe' via MUX because 'a_safe' changes
