@@ -122,7 +122,7 @@ module cart_loader (
         if (reset) begin
              sd_state <= SD_SCAN_START; // Start by scanning headers
              sd_rd <= 0;
-             sd_address <= 0;
+             sd_address <= 1; // [FIX] Initialize for Slot 0 (Block 1)
              byte_index <= 0;
              game_loaded <= 0;
              switch_pending <= 0;
@@ -383,7 +383,7 @@ module cart_loader (
                  // --- HEADER SCANNING (METADATA) ---
                  SD_SCAN_START: begin
                      // Read Block 1 + (Index * 1024)
-                     sd_address <= 1 + (scan_game_idx * 1024);
+                     // [FIX] Address is now pre-calculated to avoid race condition with sd_rd
                      byte_index <= 0;
                      bram_we <= 0;
                      
@@ -429,6 +429,7 @@ module cart_loader (
                  SD_SCAN_NEXT: begin
                      if (scan_game_idx < 15) begin // Scan first 16 games
                          scan_game_idx <= scan_game_idx + 1;
+                         sd_address <= 1 + ((scan_game_idx + 1) * 1024); // [FIX] Pre-calculate for next slot
                          sd_state <= SD_SCAN_START;
                      end else begin
                          // Done scanning
