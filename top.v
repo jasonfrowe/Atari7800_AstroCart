@@ -179,11 +179,8 @@ module top (
         // High (1) = Output (FPGA -> Atari) when we should drive.
         // Low (0)  = Input  (Atari -> FPGA) default.
         if (should_drive || pokey_we || trigger_we) begin 
-            // pokey_we/trigger_we are WRITES (Atari -> FPGA, Input, DIR=0).
-            // should_drive is READ (FPGA -> Atari, Output, DIR=1).
-            
             if (should_drive) buf_dir <= 1'b1; // Output
-            else buf_dir <= 1'b0;                // Input
+            else buf_dir <= 1'b0;              // Input
         end else begin
             buf_dir <= 1'b0; // Default to Input
         end

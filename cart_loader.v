@@ -135,7 +135,8 @@ module cart_loader (
              if (psram_wr_req) begin
                   psram_wr_req <= 0;
               end else if (write_pending && !psram_busy) begin
-                   psram_wr_req <= 1;
+                   // [FIX] Gate writes when game loaded to prevent corruption
+                   if (!game_loaded) psram_wr_req <= 1;
                    write_pending <= 0;
               end
              
@@ -279,10 +280,15 @@ module cart_loader (
                   
                   SD_CRC_START: begin
                       if (!psram_busy) begin 
-                           crc_scan_req <= 1;
-                           sd_state <= SD_CRC_WAIT;
-                           // V100: Wait for busy to assert first, then de-assert
-                           crc_busy_wait <= 1; 
+                           // [FIX] Gate CRC scan when game loaded to prevent bus contention
+                           if (!game_loaded) begin
+                               crc_scan_req <= 1;
+                               sd_state <= SD_CRC_WAIT;
+                               crc_busy_wait <= 1; 
+                           end else begin
+                               // If game loaded unexpectedly, abort to complete
+                               sd_state <= SD_COMPLETE;
+                           end
                       end
                   end
                   
@@ -321,6 +327,7 @@ module cart_loader (
                   end
                  
                  SD_COMPLETE: begin
+                     busy <= 0; // [FIX] Ensure busy is released to prevent address bus contention
                      if (trigger_eval) begin
                          if (!game_loaded && d_latched == 8'hA5) begin
                              switch_pending <= 1;
@@ -349,6 +356,21 @@ module cart_loader (
                      if (switch_pending && a_stable == 16'hFFFC) begin
                          game_loaded <= 1;
                          switch_pending <= 0;
+                         
+                         // [FIX] Clear all diagnostics to prevent noise/artifacts during gameplay
+                         checksum <= 0;
+                         psram_checksum <= 0;
+                         latch_p2 <= 0;
+                         latch_p3 <= 0;
+                         latch_p5 <= 0;
+                         latch_p6 <= 0;
+                         latch_p7 <= 0;
+                         fb0 <= 0; fb1 <= 0; fb2 <= 0; fb3 <= 0;
+                         byte_index <= 0;
+                         current_sector <= 0;
+                         last_byte_captured <= 0;
+                         psram_write_addr_latched <= 0; // Clears P4
+                         sd_state <= SD_IDLE;
                      end
                  end
              endcase
