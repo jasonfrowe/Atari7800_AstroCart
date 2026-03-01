@@ -99,6 +99,8 @@ module top (
     wire [31:0] cart_rom_size;
     wire cart_has_pokey;
     wire [15:0] cart_pokey_addr;
+    wire [3:0]  cart_mapper;        // 0=standard, 1=SuperGame
+    wire        cart_ram_at_4000;   // 1=16KB RAM mapped at $4000-$7FFF
     
 
 
@@ -365,7 +367,9 @@ module top (
         
         .cart_rom_size(cart_rom_size),
         .cart_has_pokey(cart_has_pokey),
-        .cart_pokey_addr(cart_pokey_addr)
+        .cart_pokey_addr(cart_pokey_addr),
+        .cart_mapper(cart_mapper),
+        .cart_ram_at_4000(cart_ram_at_4000)
     );
     
     always @* write_pending = write_pending_loader;
