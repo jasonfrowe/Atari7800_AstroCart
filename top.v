@@ -258,8 +258,8 @@ module top (
     wire [15:0] acc_word0;
     reg write_pending;
     reg [7:0] ip_data_buffer;
-    reg last_req_lsb;     // a_stable[0] latched when controller commits to addr
-    reg psram_busy_prev;  // one-cycle delayed busy for edge detection
+    reg [15:0] psram_word_buf; // word latched when busy falls — stable, glitch-free
+    reg psram_busy_prev;
 
     // Instantiate Custom PSRAM Controller
     PsramController #(
@@ -286,28 +286,32 @@ module top (
     assign O_psram_reset_n = 1'b1;
     
     // Data Capture Logic
-    // ip_data_buffer is a REGISTER, updated only on the falling edge of psram_busy
-    // (the cycle the completed read's data is fully settled in psram_dout_16).
     //
-    // Why registered, not combinational:
-    //   psram_dout_16 transitions at the same clock edge busy falls. A purely
-    //   combinational path would glitch d for one cycle — brief but enough to
-    //   corrupt a byte the Atari is sampling. Registering captures the stable
-    //   settled value one cycle later, completely glitch-free.
+    // psram_word_buf: registers the full 16-bit word from the PSRAM controller
+    // one cycle after busy falls.  psram_dout_16 transitions on the same edge
+    // that busy falls (the controller writes dout and sets state=IDLE in the same
+    // always block), so sampling it combinationally glitches d for ~12ns — just
+    // enough to corrupt a byte the Atari is sampling (the "snow").  Registering
+    // one cycle later captures fully-settled data.
     //
-    // last_req_lsb is captured on the RISING edge of busy — the exact cycle the
-    //   controller commits to the address word (samples addr into dq_sr). This
-    //   is 1 cycle after psram_rd_req fires (NBA delay). Capturing here rather
-    //   than at fire-time ensures byte selection matches the data returned even
-    //   if a_stable moved between the fire cycle and the controller's latch cycle.
+    // Byte selection uses LIVE a_stable[0], NOT a registered last_req_lsb.
+    // Why: the PSRAM controller returns a full word containing BOTH the even and
+    // odd byte.  When the CPU fetches sequential bytes A (even) then A+1 (odd),
+    // both bytes are already in psram_word_buf from the read for A.  Using live
+    // a_stable[0] immediately selects the correct byte the moment the address
+    // changes to A+1 — zero extra cycles, no new read needed for that byte.
+    // A registered LSB would instead hold 0 (for A), serving data[A] for A+1
+    // while a new 12–15 cycle read was in flight — wrong byte, causes crashes.
+    // The read for A+1 still fires (last_req_addr tracks per byte), returns the
+    // same word, and psram_word_buf is refreshed — consistent state throughout.
     always @(posedge sys_clk) begin
         psram_busy_prev <= psram_busy;
-        // Rising edge of busy: controller just committed to a_stable
-        if (psram_busy && !psram_busy_prev)
-            last_req_lsb <= a_stable[0];
-        // Falling edge of busy: dout is fully settled — capture byte
-        if (!psram_busy && psram_busy_prev)
-            ip_data_buffer <= last_req_lsb ? psram_dout_16[15:8] : psram_dout_16[7:0];
+        if (!psram_busy && psram_busy_prev)  // falling edge: dout settled
+            psram_word_buf <= psram_dout_16;
+    end
+
+    always @* begin
+        ip_data_buffer = a_stable[0] ? psram_word_buf[15:8] : psram_word_buf[7:0];
     end
 
     // PSRAM Read/Write Logic
@@ -332,8 +336,6 @@ module top (
                 (a_stable != last_req_addr || (!game_loaded_d && game_loaded))) begin
                 psram_rd_req <= 1;
                 last_req_addr <= a_stable;
-                // last_req_lsb is now updated on rising edge of busy (see Data Capture block)
-                // so do NOT set it here — the controller latches addr one cycle after rd_req fires.
             end else if (psram_busy) begin
                 psram_rd_req <= 0;
             end else if (!game_loaded) begin
