@@ -250,9 +250,15 @@ module top (
     wire [22:0] psram_write_addr_latched;
     // Drive addr from live a_stable in game mode — the PsramController latches addr
     // internally at the start of each operation, so this is safe.
+    // When prefetch_active=1 (pre-fetching reset vector on switch_pending rise),
+    // override addr to $BFFC ($FFFC - $4000) so psram_dout_16 is populated with
+    // the game's reset vector before game_loaded=1 fires.
+    reg prefetch_active;
     wire [21:0] psram_addr_mux = game_loaded
         ? ({6'b0, a_stable} - 22'h004000)
-        : psram_write_addr_latched[21:0];
+        : prefetch_active
+            ? 22'h00BFFC                       // $FFFC - $4000: pre-fetch reset vector
+            : psram_write_addr_latched[21:0];
     wire [22:0] psram_cmd_addr = {1'b0, psram_addr_mux};
     
     wire [15:0] acc_word0;
@@ -299,22 +305,46 @@ module top (
     // PSRAM Read/Write Logic
     reg [15:0] last_req_addr;
     reg game_loaded_d;
+    reg switch_pending_prev;
     
     always @(posedge sys_clk) begin
         game_loaded_d <= game_loaded;
+        switch_pending_prev <= switch_pending;
         
         if (sd_reset) begin
             last_req_addr <= 16'hFFFF;
+            prefetch_active <= 0;
         end else begin
-            // Prefetch: trigger PSRAM read on every address change.
-            // Full 16-bit comparison (not word-boundary) is required because MARIA performs
-            // non-sequential DMA — it jumps between distant ROM addresses. Using word-boundary
-            // comparison allows psram_dout_16 to be silently overwritten by an intervening
-            // read before the odd byte is served, returning stale data.
-            // Every address change fires a fresh read; psram_cmd_addr[0] = a_stable[0]
-            // always selects the correct byte from the returned 16-bit word.
-            // Also fire on rising edge of game_loaded ($FFFC reset vector may already be stable).
-            if (game_loaded && (a_stable[15] | a_stable[14]) && !psram_busy &&
+            // ---------------------------------------------------------------
+            // RESET-VECTOR PRE-FETCH
+            // When switch_pending rises (from the 0xA5 write to $2200), the
+            // Atari CPU still has several instructions to execute before it
+            // reads $FFFC for the JMP-via-vector handover.  Pre-fetching $FFFC
+            // now gives the PSRAM >450 sys_clk cycles (10+ CPU instructions)
+            // to return the game reset vector long before ip_data_buffer needs
+            // to serve it.
+            //
+            // Without this, psram_dout_16=0 (never read before, only written
+            // by the loader) when game_loaded=1 fires.  The CPU reads 0x00 as
+            // the reset vector, jumps to $0000 (TIA space), and executes TIA
+            // register values as 6502 opcodes for a few seconds before crashing.
+            //
+            // Setting last_req_addr=$FFFC here prevents a second racy read
+            // when game_loaded=1 fires on the $FFFC bus cycle — no new read
+            // fires, and psram_dout_16 already holds the correct vector data.
+            // ---------------------------------------------------------------
+            if (switch_pending && !switch_pending_prev && !psram_busy && !game_loaded) begin
+                psram_rd_req    <= 1;
+                prefetch_active <= 1;
+                last_req_addr   <= 16'hFFFC;  // $FFFC will have been fetched
+            end else if (prefetch_active && psram_busy) begin
+                prefetch_active <= 0;          // PSRAM accepted the request
+                psram_rd_req    <= 0;
+            // ---------------------------------------------------------------
+            // Normal game-mode reads: fire a fresh PSRAM read on every
+            // address change so ip_data_buffer always reflects the current bus.
+            // ---------------------------------------------------------------
+            end else if (game_loaded && (a_stable[15] | a_stable[14]) && !psram_busy &&
                 (a_stable != last_req_addr || (!game_loaded_d && game_loaded))) begin
                 psram_rd_req <= 1;
                 last_req_addr <= a_stable;
@@ -322,7 +352,7 @@ module top (
                 psram_rd_req <= 0;
             end else if (!game_loaded) begin
                 psram_rd_req <= 0;
-                last_req_addr <= 16'hFFFF;
+                if (!switch_pending) last_req_addr <= 16'hFFFF; // preserve during handover
             end
         end
     end
