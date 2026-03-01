@@ -101,6 +101,60 @@ module top (
     wire [15:0] cart_pokey_addr;
     wire [3:0]  cart_mapper;        // 0=standard, 1=SuperGame
     wire        cart_ram_at_4000;   // 1=16KB RAM mapped at $4000-$7FFF
+
+    // -----------------------------------------------------------------------
+    // SuperGame (SGM) Mapper
+    // is_sgm gates ALL SGM logic — non-SGM games are completely unaffected.
+    // -----------------------------------------------------------------------
+    wire is_sgm = (cart_mapper == 4'd1);
+
+    // Bank register — CPU write to $8000-$BFFF latches d[3:0] as the bank
+    // number for the switchable window.  This is the only way bank changes
+    // happen; the register is held at 0 until PLL locks.
+    reg [3:0] bank_reg;
+    wire sgm_bank_we = is_sgm && game_loaded && !rw_safe && phi2_safe
+                       && (a_stable[15:14] == 2'b10); // any addr $8000-$BFFF
+    always @(posedge sys_clk) begin
+        if (!pll_lock) bank_reg <= 4'd0;
+        else if (sgm_bank_we) bank_reg <= d[3:0];
+    end
+
+    // SGM read-address mux
+    //   $4000-$7FFF  →  PSRAM 0x40000 + a[13:0]  (16KB RAM above ROM)
+    //   $8000-$BFFF  →  PSRAM bank_reg*16K + a[13:0]  (switchable ROM bank)
+    //   $C000-$FFFF  →  PSRAM 0x3C000 + a[13:0]  (fixed bank 15)
+    wire [21:0] psram_sgm_addr =
+        (a_stable[15:14] == 2'b01) ? {4'b0001, 4'b0000, a_stable[13:0]} :
+        (a_stable[15:14] == 2'b10) ? {4'b0000, bank_reg, a_stable[13:0]} :
+                                     {4'b0000, 4'b1111,  a_stable[13:0]};
+
+    // SGM RAM write path — CPU writes to $4000-$7FFF byte-write PSRAM 0x40000.
+    // A registered 1-cycle pulse (sgm_do_write_r) is used instead of a
+    // combinational gate to avoid a feedback path through PsramController.busy.
+    reg        sgm_wr_pending;    // write is queued, waiting for !psram_busy
+    reg        sgm_do_write_r;    // 1-cycle registered write pulse to PSRAM
+    reg [21:0] sgm_wr_addr_r;     // latched PSRAM address for the write
+    reg [7:0]  sgm_wr_byte_r;     // latched data byte
+    reg        sgm_ram_we_prev;
+    wire sgm_ram_we_wire = is_sgm && cart_ram_at_4000 && game_loaded
+                           && !rw_safe && phi2_safe
+                           && (a_stable[15:14] == 2'b01); // $4000-$7FFF
+    always @(posedge sys_clk) begin
+        sgm_ram_we_prev <= sgm_ram_we_wire;
+        sgm_do_write_r  <= 0; // default: pulse is low
+        if (!pll_lock) begin
+            sgm_wr_pending <= 0;
+        end else if (sgm_ram_we_wire && !sgm_ram_we_prev && !sgm_wr_pending) begin
+            // Rising edge of CPU write: latch address + data, set pending
+            sgm_wr_pending <= 1;
+            sgm_wr_addr_r  <= {4'b0001, 4'b0000, a_stable[13:0]}; // 0x40000+offset
+            sgm_wr_byte_r  <= d;
+        end else if (sgm_wr_pending && !psram_busy) begin
+            // PSRAM free: fire the registered 1-cycle write pulse
+            sgm_do_write_r <= 1;
+            sgm_wr_pending <= 0;
+        end
+    end
     
 
 
@@ -248,13 +302,20 @@ module top (
     
     // PSRAM Address
     wire [22:0] psram_write_addr_latched;
-    // Drive addr from live a_stable in game mode — the PsramController latches addr
-    // internally at the start of each operation, so this is safe.
+    // During game, use SGM mux for SuperGame carts, flat offset for standard.
+    // During load, use the cart_loader write address.
     wire [21:0] psram_addr_mux = game_loaded
-        ? ({6'b0, a_stable} - 22'h004000)
+        ? (is_sgm ? psram_sgm_addr : ({6'b0, a_stable} - 22'h004000))
         : psram_write_addr_latched[21:0];
     wire [22:0] psram_cmd_addr = {1'b0, psram_addr_mux};
-    
+
+    // SGM RAM write arbitration — when sgm_do_write_r is high (1 cycle) the
+    // write takes priority; all other cycles the normal read/load path drives.
+    wire        psram_final_write = psram_wr_req || sgm_do_write_r;
+    wire [21:0] psram_final_addr  = sgm_do_write_r ? sgm_wr_addr_r              : psram_cmd_addr[21:0];
+    wire [15:0] psram_final_din   = sgm_do_write_r ? {sgm_wr_byte_r,sgm_wr_byte_r} : acc_word0;
+    wire        psram_final_bw    = sgm_do_write_r; // byte_write only for SGM RAM writes
+
     wire [15:0] acc_word0;
     reg write_pending;
     reg [7:0] ip_data_buffer;
@@ -267,13 +328,13 @@ module top (
         .clk(clk_81m),
         .clk_p(clk_81m_shifted),
         .resetn(pll_lock),
-        .read(psram_cmd_read),    // Use 81MHz Synchronized Pulse
-        .write(psram_cmd_write),  // Use 81MHz Synchronized Pulse
-        .addr(psram_cmd_addr[21:0]),
-        .din(acc_word0[15:0]),
-        .byte_write(1'b0),
+        .read(psram_cmd_read),
+        .write(psram_final_write),
+        .addr(psram_final_addr),
+        .din(psram_final_din),
+        .byte_write(psram_final_bw),
         .dout(psram_dout_16),
-        .busy(psram_busy_raw),    // Raw 81MHz output to be synchronized down to 27MHz
+        .busy(psram_busy_raw),
         .O_psram_ck(O_psram_ck),
         .O_psram_ck_n(O_psram_ck_n),
         .O_psram_cs_n(O_psram_cs_n),
@@ -306,7 +367,14 @@ module top (
             // Every address change fires a fresh read; psram_cmd_addr[0] = a_stable[0]
             // always selects the correct byte from the returned 16-bit word.
             // Also fire on rising edge of game_loaded ($FFFC reset vector may already be stable).
-            if (game_loaded && (a_stable[15] | a_stable[14]) && !psram_busy &&
+            // Gate reads on !sgm_wr_pending AND !sgm_do_write_r:
+            // - sgm_do_write_r: the 1-cycle write pulse is live, PSRAM is busy.
+            // - sgm_wr_pending: the write is queued; sgm_do_write_r fires NEXT
+            //   cycle when !psram_busy, so both the pending flag AND the pulse
+            //   itself must block reads to prevent a read/write conflict on the
+            //   cycle that pending clears and sgm_do_write_r is about to set.
+            if (game_loaded && !sgm_wr_pending && !sgm_do_write_r &&
+                (a_stable[15] | a_stable[14]) && !psram_busy &&
                 (a_stable != last_req_addr || (!game_loaded_d && game_loaded))) begin
                 psram_rd_req <= 1;
                 last_req_addr <= a_stable;
@@ -316,6 +384,16 @@ module top (
                 psram_rd_req <= 0;
                 last_req_addr <= 16'hFFFF;
             end
+            // Cache invalidations LAST — these must win the NBA race against the
+            // read trigger above (later assignment in same always block wins).
+            //
+            // sgm_bank_we:    CPU switched the ROM bank; the new bank maps
+            //                 different data to $8000-$BFFF, so the cached read
+            //                 at that address is now stale.
+            // sgm_do_write_r: CPU just wrote to SGM RAM ($4000-$7FFF); any
+            //                 cached read at the written address would return
+            //                 the pre-write value — MARIA must re-fetch.
+            if (sgm_bank_we || sgm_do_write_r) last_req_addr <= 16'hFFFF;
         end
     end
 
