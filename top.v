@@ -224,39 +224,18 @@ module top (
         else clk_div <= clk_div + 1;
     end
 
-    // POKEY Pulse Stretcher
-    // tick_179 fires every 45 sys_clk (~556ns). A CPU write pulse via phi2_safe is
-    // ~22 sys_clk wide (~272ns) — a <50% window. Without stretching there's a >50%
-    // chance tick_179 never fires while pokey_we is high, causing the write to be missed.
-    // On the rising edge of pokey_we we latch the stable bus values, then hold
-    // pokey_we_stretch high until tick_179 fires (guaranteeing POKEY consumes the write).
-    reg       pokey_we_stretch;
-    reg [7:0] pokey_din_latched;
-    reg [3:0] pokey_addr_latched;
-    reg       pokey_we_prev;
-
-    always @(posedge sys_clk) begin
-        pokey_we_prev <= pokey_we;
-        if (!pll_lock) begin
-            pokey_we_stretch <= 0;
-        end else if (pokey_we && !pokey_we_prev) begin
-            // Rising edge: latch stable bus values and start stretching
-            pokey_din_latched  <= d;
-            pokey_addr_latched <= a_stable[3:0];
-            pokey_we_stretch   <= 1;
-        end else if (pokey_we_stretch && tick_179) begin
-            // POKEY's internal clock just ticked while we held write high — write consumed
-            pokey_we_stretch <= 0;
-        end
-    end
-
+    // POKEY — live bus signals.
+    // enable_179mhz (tick_179) is POKEY's internal sampling clock (~1.79MHz =
+    // every 45 sys_clk cycles).  It fires well into any phi2 window (~22 cycles
+    // wide) where the 6502 data bus is fully settled, so no latching is needed.
+    // Passing we/addr/din live matches the original working design (340c9ba).
     pokey_advanced my_pokey (
         .clk(sys_clk),
         .enable_179mhz(tick_179),
         .reset_n(pll_lock),
-        .addr(pokey_addr_latched),
-        .din(pokey_din_latched),
-        .we(pokey_we_stretch),        // Pulse-stretched write enable
+        .addr(a_stable[3:0]),
+        .din(d),
+        .we(pokey_we),
         .audio_pwm(audio)
     );
 
