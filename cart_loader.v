@@ -52,12 +52,7 @@ module cart_loader (
     // BRAM Write Interface (for Menu Building)
     output reg bram_we,
     output reg [15:0] bram_addr,
-    output reg [7:0] bram_data,
-
-    // Header Info
-    output reg [31:0] cart_rom_size,
-    output reg cart_has_pokey,
-    output reg [15:0] cart_pokey_addr
+    output reg [7:0] bram_data
 );
 
     // SD Controller signals
@@ -123,8 +118,6 @@ module cart_loader (
     
     reg [4:0] scan_game_idx; // Scan up to 32 games
 
-    reg [15:0] cart_type;
-
     always @(posedge clk_sys) begin
         if (reset) begin
              sd_state <= SD_SCAN_START; // Start by scanning headers
@@ -153,11 +146,6 @@ module cart_loader (
              bram_we <= 0;
              bram_addr <= 0;
              bram_data <= 0;
-
-             cart_rom_size <= 0;
-             cart_has_pokey <= 0;
-             cart_pokey_addr <= 0;
-             cart_type <= 0;
         end else begin
              trigger_we_prev <= trigger_we;
              
@@ -206,11 +194,6 @@ module cart_loader (
                             busy <= 1;
                             checksum <= 0;
                             psram_load_addr <= 0;
-
-                            cart_rom_size <= 0;
-                            cart_has_pokey <= 0;
-                            cart_pokey_addr <= 0;
-                            cart_type <= 0;
                         end
                         else if (d_latched == 8'h5A) begin
                              // RELOAD: Magic Key 0x5A
@@ -222,11 +205,6 @@ module cart_loader (
                              busy <= 1;
                              game_loaded <= 0; // Force unload
                              switch_pending <= 0;
-
-                             cart_rom_size <= 0;
-                             cart_has_pokey <= 0;
-                             cart_pokey_addr <= 0;
-                             cart_type <= 0;
                         end
                         // Add catch for $64 (100) soft-reload as well for joystick shortcut
                         else if (d_latched == 8'h40) begin
@@ -238,11 +216,6 @@ module cart_loader (
                              busy <= 1;
                              game_loaded <= 0;
                              switch_pending <= 0;
-
-                             cart_rom_size <= 0;
-                             cart_has_pokey <= 0;
-                             cart_pokey_addr <= 0;
-                             cart_type <= 0;
                         end
                     end
                 end
@@ -298,16 +271,6 @@ module cart_loader (
                              end
                              
                              psram_load_addr <= psram_load_addr + 1; 
-                         end else begin
-                             // Sector 0: Header Parsing (Big Endian based on hexdump)
-                             case (byte_index)
-                                 49: cart_rom_size[31:24] <= sd_dout_reg;
-                                 50: cart_rom_size[23:16] <= sd_dout_reg;
-                                 51: cart_rom_size[15:8]  <= sd_dout_reg;
-                                 52: cart_rom_size[7:0]   <= sd_dout_reg;
-                                 53: cart_type[15:8]      <= sd_dout_reg;
-                                 54: cart_type[7:0]       <= sd_dout_reg;
-                             endcase
                          end
                          
                          byte_index <= byte_index + 1;
@@ -316,32 +279,7 @@ module cart_loader (
 
                  SD_NEXT: begin
                      psram_wr_req <= 0;
-                     
-                     // Decode POKEY settings after header sector
-                     if (current_sector == 0) begin
-                         if (cart_type[15]) begin // Bit 15: $800
-                             cart_has_pokey <= 1;
-                             cart_pokey_addr <= 16'h0800;
-                         end else if (cart_type[10]) begin // Bit 10: $440
-                             cart_has_pokey <= 1;
-                             cart_pokey_addr <= 16'h0440;
-                         end else if (cart_type[6]) begin // Bit 6: $450
-                             cart_has_pokey <= 1;
-                             cart_pokey_addr <= 16'h0450;
-                         end else if (cart_type[0]) begin // Bit 0: $4000
-                             cart_has_pokey <= 1;
-                             cart_pokey_addr <= 16'h4000;
-                         end else begin
-                             cart_has_pokey <= 0;
-                         end
-                     end
-
-                     // Calculate sector limit based on ROM size + Header (128 bytes)
-                     // If size is 0 (failed read), default to 512 sectors (256KB)
-                     // Total bytes = cart_rom_size + 128
-                     // Total sectors = ceil(Total bytes / 512)
-                     // We check (current_sector + 1) < limit
-                     if (current_sector + 1 < ((cart_rom_size == 0) ? 512 : ((cart_rom_size + 128 + 511) >> 9))) begin 
+                     if (current_sector < 512) begin // 256KB total per game
                           current_sector <= current_sector + 1;
                           sd_address <= sd_address + 1; // Advance true SD Block Address
                           sd_state <= SD_START;
@@ -424,11 +362,6 @@ module cart_loader (
                              checksum <= 0;
                              psram_load_addr <= 0;
                              trigger_lock_active <= 1; // Prevent continuous reloading!
-
-                             cart_rom_size <= 0;
-                             cart_has_pokey <= 0;
-                             cart_pokey_addr <= 0;
-                             cart_type <= 0;
                          end
                          else if (d_latched == 8'h5A) begin
                              sd_state <= SD_START;
@@ -438,11 +371,6 @@ module cart_loader (
                              busy <= 1;
                              game_loaded <= 0; 
                              switch_pending <= 0;
-
-                             cart_rom_size <= 0;
-                             cart_has_pokey <= 0;
-                             cart_pokey_addr <= 0;
-                             cart_type <= 0;
                          end
                      end
                      
@@ -455,7 +383,7 @@ module cart_loader (
                  // --- HEADER SCANNING (METADATA) ---
                  SD_SCAN_START: begin
                      // Read Block 1 + (Index * 1024)
-                     sd_address <= 1 + (scan_game_idx * 1024);
+                     // [FIX] Address is now pre-calculated to avoid race condition with sd_rd
                      byte_index <= 0;
                      bram_we <= 0;
                      
@@ -501,6 +429,7 @@ module cart_loader (
                  SD_SCAN_NEXT: begin
                      if (scan_game_idx < 15) begin // Scan first 16 games
                          scan_game_idx <= scan_game_idx + 1;
+                         sd_address <= 1 + ((scan_game_idx + 1) * 1024); // [FIX] Pre-calculate for next slot
                          sd_state <= SD_SCAN_START;
                      end else begin
                          // Done scanning

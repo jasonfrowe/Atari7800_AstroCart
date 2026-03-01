@@ -119,11 +119,6 @@ module top (
     wire [15:0] bram_addr;
     wire [7:0] bram_data;
     
-    // Header Info from Loader
-    wire [31:0] cart_rom_size;
-    wire cart_has_pokey;
-    wire [15:0] cart_pokey_addr;
-    
     // Hex-to-ASCII converter helper
     wire [7:0] diag_data_out;
     diag_rom diag_inst (
@@ -169,10 +164,7 @@ module top (
     end
     // Decoders (Using STABLE address to prevent bus contention during transitions)
     wire is_rom   = (a_stable[15] | a_stable[14]);               // $4000-$FFFF
-    
-    // Dynamic POKEY decoding based on header
-    wire is_pokey = cart_has_pokey && (a_stable[15:4] == cart_pokey_addr[15:4]);
-    
+    wire is_pokey = (a_stable[15:4] == 12'h045);               // $0450-$045F
     wire is_2200  = (a_stable == 16'h2200) && !game_loaded;    // $2200 (Menu Control disabled in game)
 
     // ========================================================================
@@ -554,11 +546,7 @@ module top (
         
         .bram_we(bram_we),
         .bram_addr(bram_addr),
-        .bram_data(bram_data),
-        
-        .cart_rom_size(cart_rom_size),
-        .cart_has_pokey(cart_has_pokey),
-        .cart_pokey_addr(cart_pokey_addr)
+        .bram_data(bram_data)
     );
     
     always @* write_pending = write_pending_loader;
