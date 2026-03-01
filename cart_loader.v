@@ -80,7 +80,6 @@ module cart_loader (
     localparam SD_NEXT       = 4;
     localparam SD_COMPLETE   = 5;
     localparam SD_DRAIN      = 9; // Wait for last PSRAM write to commit
-    localparam SD_CLEAR_RAM  = 14; // Zero SGM RAM region (PSRAM 0x40000-0x43FFF)
     
     localparam SD_SCAN_START = 10;
     localparam SD_SCAN_WAIT  = 11;
@@ -100,7 +99,6 @@ module cart_loader (
     reg trigger_eval;
     reg trigger_lock_active;
     reg [7:0] drain_timer;
-    reg        ram_init_busy_seen; // Guards SD_CLEAR_RAM tight write loop
     reg [7:0] d_pipe [0:2];
     
     reg [4:0] scan_game_idx; // Scan up to 32 games
@@ -139,7 +137,6 @@ module cart_loader (
              psram_load_addr <= 23'h000000;
              sd_dout_reg <= 0;
              drain_timer <= 0;
-             ram_init_busy_seen <= 0;
              
              scan_game_idx <= 0;
              bram_we <= 0;
@@ -343,55 +340,8 @@ module cart_loader (
                       // Wait ~400ns (32 cycles @ 81MHz) to ensure last write is committed
                       drain_timer <= drain_timer + 1;
                       if (drain_timer == 32) begin
-                          if (cart_ram_at_4000) begin
-                              // Zero the 16KB SGM RAM region before the game boots.
-                              // Emulators (a7800, A7800DS) call memory_ClearROM(0x4000, 0x4000)
-                              // before game start. Our PSRAM is indeterminate on power-up,
-                              // so we must do the same or ARTI will read garbage from its RAM.
-                              // 16KB / 2 bytes per word = 8192 word writes ≈ 2ms extra load time.
-                              acc_word0            <= 16'h0000;
-                              psram_load_addr      <= 23'h040000; // SGM RAM base
-                              psram_wr_req         <= 0;
-                              write_pending        <= 0;
-                              ram_init_busy_seen   <= 0;
-                              sd_state             <= SD_CLEAR_RAM;
-                          end else begin
-                              sd_state <= SD_COMPLETE;
-                              busy <= 0;
-                          end
-                      end
-                  end
-
-                  SD_CLEAR_RAM: begin
-                      // Zero-fill PSRAM 0x40000-0x43FFE (8192 words = 16KB SGM RAM).
-                      // acc_word0 is locked at 0x0000 from SD_DRAIN entry.
-                      //
-                      // Race guard: psram_busy may assert 1-2 cycles after psram_wr_req
-                      // pulses. We track whether busy has been observed HIGH since the last
-                      // write request so the tight loop never fires a second write during
-                      // the transient !wr_req && !busy window between request and controller
-                      // acknowledgement.
-                      //
-                      //  ram_init_busy_seen = 0 on entry  (no prior write in this state)
-                      //  first-write guard: psram_load_addr == 23'h040000  (fire once)
-                      //  after that:        ram_init_busy_seen == 1 (busy was observed)
-                      //
-                      if (psram_busy) begin
-                          ram_init_busy_seen <= 1;
-                      end else if (!write_pending && !psram_wr_req &&
-                                   (ram_init_busy_seen ||
-                                    psram_load_addr == 23'h040000)) begin
-                          // Slot is free: previous write done (busy seen then gone)
-                          // OR this is the very first write (load_addr still at base).
-                          ram_init_busy_seen <= 0;
-                          if (psram_load_addr <= 23'h043FFE) begin
-                              psram_write_addr_latched <= psram_load_addr;
-                              write_pending            <= 1;
-                              psram_load_addr          <= psram_load_addr + 2;
-                          end else begin
-                              sd_state <= SD_COMPLETE;
-                              busy     <= 0;
-                          end
+                          sd_state <= SD_COMPLETE;
+                          busy <= 0;
                       end
                   end
                  
