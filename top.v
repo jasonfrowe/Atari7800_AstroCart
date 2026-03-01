@@ -230,10 +230,12 @@ module top (
     end
 
     // POKEY Write Path
-    // Latch addr and data on the rising edge of pokey_we to capture stable
-    // bus values. we is passed live — the POKEY core registers writes
-    // synchronously on every sys_clk cycle where we=1, so the full CPU
-    // write window (~272ns / ~22 cycles) is more than enough. No stretching.
+    // Latch addr and data on the rising edge of pokey_we.  The write enable
+    // passed to POKEY is pokey_we_prev (1 cycle delayed) so that addr/data
+    // latches have settled before the first write clock edge fires.
+    // NBA timing: latches update at end of the rising-edge cycle; using the
+    // delayed copy ensures POKEY always sees current addr/data, never stale.
+    // The write window is still ~21 sys_clk cycles (~259ns) — more than enough.
     reg [7:0] pokey_din_latched;
     reg [3:0] pokey_addr_latched;
     reg       pokey_we_prev;
@@ -253,7 +255,7 @@ module top (
         .reset_n(pll_lock),
         .addr(pokey_addr_latched),
         .din(pokey_din_latched),
-        .we(pokey_we),
+        .we(pokey_we_prev),   // 1-cycle delay ensures latches are settled
         .audio_pwm(audio)
     );
 
