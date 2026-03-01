@@ -168,7 +168,12 @@ module top (
         end
     end
     // Decoders (Using STABLE address to prevent bus contention during transitions)
-    wire is_rom   = (a_stable[15] | a_stable[14]);               // $4000-$FFFF
+    // $8000-$FFFF: always ROM space for all carts.
+    // $4000-$7FFF: only drive for 48KB+ carts (cart_rom_size > 32768) or SGM carts
+    //   (which map SGM RAM there).  32KB carts like Choplifter don't use this range;
+    //   driving it serves stale PSRAM data from a previously-loaded 256KB game and
+    //   causes crashes when BIOS or MARIA accesses $4000-$7FFF.
+    wire is_rom   = a_stable[15] || (a_stable[14] && (is_sgm || cart_rom_size > 32768));
     wire is_pokey = cart_has_pokey && (a_stable[15:4] == cart_pokey_addr[15:4]);
     wire is_2200  = (a_stable == 16'h2200) && !game_loaded;    // $2200 (Menu Control disabled in game)
 
