@@ -380,12 +380,14 @@ module top (
             // SGM BANK SWITCH CACHE INVALIDATION:
             // last_req_addr tracks only a_stable, not the effective PSRAM address.
             // After a SuperGame bank switch the same CPU address maps to a different
-            // PSRAM location. Without invalidation the read trigger sees
-            // a_stable == last_req_addr and silently serves stale data from the old
-            // bank — corrupting MARIA tile DMA. Force a full re-fetch on every bank write.
-            if (sgm_bank_we) last_req_addr <= 16'hFFFF;
-
-            if (game_loaded && !sgm_do_write_r && (a_stable[15] | a_stable[14]) && !psram_busy &&
+            // PSRAM location. We must force a full re-fetch on every bank write.
+            //
+            // CRITICAL: the read trigger and the invalidation are both non-blocking
+            // assignments to last_req_addr in the same always block. In Verilog, the
+            // LAST assignment wins. To ensure invalidation always wins:
+            //   (a) gate the read trigger with !sgm_bank_we so both never fire together,
+            //   (b) place the invalidation AFTER the read trigger in source order.
+            if (game_loaded && !sgm_bank_we && !sgm_do_write_r && (a_stable[15] | a_stable[14]) && !psram_busy &&
                 (a_stable != last_req_addr || (!game_loaded_d && game_loaded))) begin
                 psram_rd_req <= 1;
                 last_req_addr <= a_stable;
@@ -395,6 +397,9 @@ module top (
                 psram_rd_req <= 0;
                 last_req_addr <= 16'hFFFF;
             end
+            // Bank-switch invalidation comes LAST so it wins any non-blocking
+            // assignment race with the read trigger above.
+            if (sgm_bank_we) last_req_addr <= 16'hFFFF;
         end
     end
 
