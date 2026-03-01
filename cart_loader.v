@@ -52,7 +52,12 @@ module cart_loader (
     // BRAM Write Interface (for Menu Building)
     output reg bram_we,
     output reg [15:0] bram_addr,
-    output reg [7:0] bram_data
+    output reg [7:0] bram_data,
+
+    // Header Info
+    output reg [31:0] cart_rom_size,
+    output reg cart_has_pokey,
+    output reg [15:0] cart_pokey_addr
 );
 
     // SD Controller signals
@@ -118,6 +123,14 @@ module cart_loader (
     
     reg [4:0] scan_game_idx; // Scan up to 32 games
 
+    // Header capture registers
+    reg [7:0] h49, h50, h51, h52; // Size
+    reg [7:0] h53, h54;           // Flags
+
+    wire [31:0] size_be_wire = {h49, h50, h51, h52};
+    wire [31:0] size_le_wire = {h52, h51, h50, h49};
+    wire is_be_valid = (size_be_wire == 32'd16384 || size_be_wire == 32'd32768 || size_be_wire == 32'd49152);
+
     always @(posedge clk_sys) begin
         if (reset) begin
              sd_state <= SD_SCAN_START; // Start by scanning headers
@@ -146,6 +159,10 @@ module cart_loader (
              bram_we <= 0;
              bram_addr <= 0;
              bram_data <= 0;
+
+             cart_rom_size <= 49152; // Default to 48K
+             cart_has_pokey <= 1;    // Default to POKEY enabled (safe for Astro Wing)
+             cart_pokey_addr <= 16'h0450;
         end else begin
              trigger_we_prev <= trigger_we;
              
@@ -194,6 +211,10 @@ module cart_loader (
                             busy <= 1;
                             checksum <= 0;
                             psram_load_addr <= 0;
+                            
+                            cart_rom_size <= 49152;
+                            cart_has_pokey <= 1;
+                            cart_pokey_addr <= 16'h0450;
                         end
                         else if (d_latched == 8'h5A) begin
                              // RELOAD: Magic Key 0x5A
@@ -271,6 +292,16 @@ module cart_loader (
                              end
                              
                              psram_load_addr <= psram_load_addr + 1; 
+                         end else begin
+                             // Sector 0: Capture Header Bytes
+                             case (byte_index)
+                                 49: h49 <= sd_dout_reg;
+                                 50: h50 <= sd_dout_reg;
+                                 51: h51 <= sd_dout_reg;
+                                 52: h52 <= sd_dout_reg;
+                                 53: h53 <= sd_dout_reg;
+                                 54: h54 <= sd_dout_reg;
+                             endcase
                          end
                          
                          byte_index <= byte_index + 1;
@@ -279,6 +310,41 @@ module cart_loader (
 
                  SD_NEXT: begin
                      psram_wr_req <= 0;
+                     
+                     // Analyze Header after Sector 0 is done
+                     if (current_sector == 0) begin
+                         // 1. Determine Size, Offset & Endianness
+                         cart_has_pokey <= 0;
+                         
+                         if (is_be_valid) begin
+                             // Big Endian (Astrowing)
+                             cart_rom_size <= size_be_wire;
+                             psram_load_addr <= 49152 - size_be_wire;
+                             
+                             // BE Flags: h53=High, h54=Low
+                             // Bit 6 ($450) is in Low Byte (h54)
+                             if (h54[6]) begin cart_has_pokey <= 1; cart_pokey_addr <= 16'h0450; end
+                             else if (h54[0]) begin cart_has_pokey <= 1; cart_pokey_addr <= 16'h4000; end
+                             else if (h53[2]) begin cart_has_pokey <= 1; cart_pokey_addr <= 16'h0440; end
+                             else if (h53[7]) begin cart_has_pokey <= 1; cart_pokey_addr <= 16'h0800; end
+                         end else begin
+                             // Little Endian (Standard) or Default
+                             if (size_le_wire == 32'd16384 || size_le_wire == 32'd32768 || size_le_wire == 32'd49152) begin
+                                 cart_rom_size <= size_le_wire;
+                                 psram_load_addr <= 49152 - size_le_wire;
+                             end else begin
+                                 cart_rom_size <= 49152;
+                                 psram_load_addr <= 0;
+                             end
+                             
+                             // LE Flags: h54=High, h53=Low
+                             if (h53[6]) begin cart_has_pokey <= 1; cart_pokey_addr <= 16'h0450; end
+                             else if (h53[0]) begin cart_has_pokey <= 1; cart_pokey_addr <= 16'h4000; end
+                             else if (h54[2]) begin cart_has_pokey <= 1; cart_pokey_addr <= 16'h0440; end
+                             else if (h54[7]) begin cart_has_pokey <= 1; cart_pokey_addr <= 16'h0800; end
+                         end
+                     end
+
                      if (current_sector < 512) begin // 256KB total per game
                           current_sector <= current_sector + 1;
                           sd_address <= sd_address + 1; // Advance true SD Block Address
