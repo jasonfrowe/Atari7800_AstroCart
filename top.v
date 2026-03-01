@@ -255,7 +255,7 @@ module top (
     pokey_advanced my_pokey (
         .clk(sys_clk),
         .enable_179mhz(tick_179),
-        .reset_n(pll_lock),
+        .reset_n(pll_lock && game_loaded),   // Reset between games (not just on power-on)
         .addr(pokey_addr_latched),
         .din(pokey_din_latched),
         .we(pokey_we_stretch),        // Pulse-stretched write enable
@@ -395,9 +395,18 @@ module top (
                 psram_rd_req <= 0;
                 last_req_addr <= 16'hFFFF;
             end
-            // Bank-switch invalidation comes LAST so it wins any non-blocking
-            // assignment race with the read trigger above.
-            if (sgm_bank_we) last_req_addr <= 16'hFFFF;
+            // Bank-switch and SGM RAM write invalidations come LAST so they win
+            // any non-blocking assignment race with the read trigger above.
+            //
+            // sgm_bank_we  : banked region ($8000-$BFFF) now maps to a new bank,
+            //   so any cached address in that range is stale.
+            // sgm_do_write_r : CPU just wrote to SGM RAM ($4000-$7FFF).  The write
+            //   pulse fires on the cycle that PsramController actually commits the
+            //   byte to PSRAM 0x40000.  If last_req_addr == the written address,
+            //   MARIA's next read would be a cache hit and return the OLD value.
+            //   Forcing last_req_addr = $FFFF ensures a fresh PSRAM read fires
+            //   for any address after the write, so MARIA always sees current data.
+            if (sgm_bank_we || sgm_do_write_r) last_req_addr <= 16'hFFFF;
         end
     end
 
