@@ -99,6 +99,8 @@ module top (
     wire [31:0] cart_rom_size;
     wire cart_has_pokey;
     wire [15:0] cart_pokey_addr;
+    wire [3:0]  cart_mapper;        // 0=standard, 1=SuperGame
+    wire        cart_ram_at_4000;   // 1=16KB RAM mapped at $4000-$7FFF
     
 
 
@@ -256,6 +258,7 @@ module top (
     wire [15:0] acc_word0;
     reg write_pending;
     reg [7:0] ip_data_buffer;
+    reg last_req_lsb;  // a_stable[0] latched when the read fires — used for byte selection
 
     // Instantiate Custom PSRAM Controller
     PsramController #(
@@ -282,8 +285,14 @@ module top (
     assign O_psram_reset_n = 1'b1;
     
     // Data Capture Logic
+    // IMPORTANT: use last_req_lsb, not live psram_cmd_addr[0].
+    // A PSRAM read takes 12-15 cycles. During that window a_stable moves freely
+    // as the CPU/MARIA advances. If we used live a_stable[0] for byte selection,
+    // the wrong half of psram_dout_16 would be served whenever the address parity
+    // changed mid-read — producing 1-2 corrupt pixels per DRAM-refresh-induced
+    // 2x-latency hit (the "snow" symptom).  Latching at request time fixes this.
     always @* begin
-        ip_data_buffer = psram_cmd_addr[0] ? psram_dout_16[15:8] : psram_dout_16[7:0];
+        ip_data_buffer = last_req_lsb ? psram_dout_16[15:8] : psram_dout_16[7:0];
     end
 
     // PSRAM Read/Write Logic
@@ -308,6 +317,7 @@ module top (
                 (a_stable != last_req_addr || (!game_loaded_d && game_loaded))) begin
                 psram_rd_req <= 1;
                 last_req_addr <= a_stable;
+                last_req_lsb  <= a_stable[0]; // latch parity now, before a_stable can change
             end else if (psram_busy) begin
                 psram_rd_req <= 0;
             end else if (!game_loaded) begin
@@ -365,7 +375,9 @@ module top (
         
         .cart_rom_size(cart_rom_size),
         .cart_has_pokey(cart_has_pokey),
-        .cart_pokey_addr(cart_pokey_addr)
+        .cart_pokey_addr(cart_pokey_addr),
+        .cart_mapper(cart_mapper),
+        .cart_ram_at_4000(cart_ram_at_4000)
     );
     
     always @* write_pending = write_pending_loader;
