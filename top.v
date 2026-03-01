@@ -285,7 +285,9 @@ module top (
     wire [21:0] psram_addr_mux = game_loaded
         ? (is_sgm ? psram_sgm_addr : ({6'b0, a_stable} - 22'h004000))
         : prefetch_active
-            ? 22'h00BFFC                       // $FFFC - $4000: pre-fetch reset vector
+            // SGM: $FFFC is in fixed bank 15 → PSRAM 0x3C000 + 0x3FFC = 0x3FFFC
+            // Standard: $FFFC - $4000 = 0x00BFFC
+            ? (is_sgm ? 22'h03FFFC : 22'h00BFFC)
             : psram_write_addr_latched[21:0];
     wire [22:0] psram_cmd_addr = {1'b0, psram_addr_mux};
 
