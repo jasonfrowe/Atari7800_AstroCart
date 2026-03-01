@@ -229,29 +229,21 @@ module top (
         else clk_div <= clk_div + 1;
     end
 
-    // POKEY Pulse Stretcher
-    // tick_179 fires every 45 sys_clk (~556ns). A CPU write pulse via phi2_safe is
-    // ~22 sys_clk wide (~272ns) — a <50% window. Without stretching there's a >50%
-    // chance tick_179 never fires while pokey_we is high, causing the write to be missed.
-    // On the rising edge of pokey_we we latch the stable bus values, then hold
-    // pokey_we_stretch high until tick_179 fires (guaranteeing POKEY consumes the write).
-    reg       pokey_we_stretch;
+    // POKEY Write Path
+    // Latch addr and data on the rising edge of pokey_we to capture stable
+    // bus values. we is passed live — the POKEY core registers writes
+    // synchronously on every sys_clk cycle where we=1, so the full CPU
+    // write window (~272ns / ~22 cycles) is more than enough. No stretching.
     reg [7:0] pokey_din_latched;
     reg [3:0] pokey_addr_latched;
     reg       pokey_we_prev;
 
     always @(posedge sys_clk) begin
         pokey_we_prev <= pokey_we;
-        if (!pll_lock) begin
-            pokey_we_stretch <= 0;
-        end else if (pokey_we && !pokey_we_prev) begin
-            // Rising edge: latch stable bus values and start stretching
+        if (pokey_we && !pokey_we_prev) begin
+            // Rising edge: capture stable bus values
             pokey_din_latched  <= d;
             pokey_addr_latched <= a_stable[3:0];
-            pokey_we_stretch   <= 1;
-        end else if (pokey_we_stretch && tick_179) begin
-            // POKEY's internal clock just ticked while we held write high — write consumed
-            pokey_we_stretch <= 0;
         end
     end
 
@@ -261,7 +253,7 @@ module top (
         .reset_n(pll_lock),
         .addr(pokey_addr_latched),
         .din(pokey_din_latched),
-        .we(pokey_we_stretch),        // Pulse-stretched write enable
+        .we(pokey_we),
         .audio_pwm(audio)
     );
 
