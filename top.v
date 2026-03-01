@@ -120,28 +120,35 @@ module top (
 
     // -----------------------------------------------------------------------
     // SuperGame RAM write path
-    // CPU writes to $4000-$7FFF (cart_ram_at_4000 set) → PSRAM 0x40000.
-    // We latch the write on the rising edge of the CPU write strobe and
-    // issue a byte-write to PSRAM when the bus is free.
+    // CPU writes to $4000-$7FFF go to PSRAM at 0x40000 via a registered
+    // 1-cycle write pulse (identical mechanism to psram_wr_req from cart_loader).
+    // Using a registered pulse instead of a combinational gate avoids a
+    // feedback loop through PsramController.busy → write input.
     // Layout: ROM 0x00000-0x3FFFF (256KB), SGM RAM 0x40000-0x43FFF (16KB).
     // -----------------------------------------------------------------------
-    reg       sgm_wr_pending;
-    reg [21:0] sgm_wr_addr;
-    reg [7:0]  sgm_wr_byte;
+    reg        sgm_wr_pending;
+    reg        sgm_do_write_r;   // registered 1-cycle PSRAM write pulse
+    reg [21:0] sgm_wr_addr_r;
+    reg [7:0]  sgm_wr_byte_r;
     reg        sgm_ram_we_prev;
     wire sgm_ram_we_wire = is_sgm && cart_ram_at_4000 && game_loaded
                            && !rw_safe && phi2_safe
                            && (a_stable[15:14] == 2'b01); // $4000-$7FFF
     always @(posedge sys_clk) begin
         sgm_ram_we_prev <= sgm_ram_we_wire;
+        sgm_do_write_r  <= 0;  // default: pulse is low
         if (!pll_lock) begin
             sgm_wr_pending <= 0;
-        end else if (sgm_ram_we_wire && !sgm_ram_we_prev) begin
-            // Rising edge of CPU write: latch address and data
+        end else if (sgm_ram_we_wire && !sgm_ram_we_prev && !sgm_wr_pending) begin
+            // Rising edge of CPU write strobe: latch address and data
             sgm_wr_pending <= 1;
-            sgm_wr_addr    <= {4'b0001, 4'b0000, a_stable[13:0]}; // PSRAM 0x40000+offset
-            sgm_wr_byte    <= d;
+            sgm_wr_addr_r  <= {4'b0001, 4'b0000, a_stable[13:0]}; // 0x40000+offset
+            sgm_wr_byte_r  <= d;
         end else if (sgm_wr_pending && !psram_busy) begin
+            // PSRAM is free: fire the registered write pulse and clear pending.
+            // sgm_do_write_r is a registered output — no combinational path back
+            // through PsramController.busy (unlike a wire would create).
+            sgm_do_write_r <= 1;
             sgm_wr_pending <= 0;
         end
     end
@@ -309,15 +316,12 @@ module top (
         : psram_write_addr_latched[21:0];
     wire [22:0] psram_cmd_addr = {1'b0, psram_addr_mux};
 
-    // SGM write arbitration: when a SGM RAM write is pending and bus is free, fire it.
-    // Gate: do not overlap with ongoing PSRAM operations.
-    wire sgm_doing_write = sgm_wr_pending && !psram_busy;
-
-    // Final signals to PsramController — SGM writes take priority over reads.
-    wire        psram_final_write = psram_wr_req || sgm_doing_write;
-    wire [21:0] psram_final_addr  = sgm_doing_write ? sgm_wr_addr              : psram_cmd_addr[21:0];
-    wire [15:0] psram_final_din   = sgm_doing_write ? {sgm_wr_byte, sgm_wr_byte}: acc_word0;
-    wire        psram_final_bw    = sgm_doing_write; // byte_write=1 for SGM RAM
+    // SGM write arbitration — use registered pulse to keep PsramController
+    // inputs fully registered (no combinational feedback through .busy).
+    wire        psram_final_write = psram_wr_req || sgm_do_write_r;  // both registered
+    wire [21:0] psram_final_addr  = sgm_do_write_r ? sgm_wr_addr_r               : psram_cmd_addr[21:0];
+    wire [15:0] psram_final_din   = sgm_do_write_r ? {sgm_wr_byte_r, sgm_wr_byte_r} : acc_word0;
+    wire        psram_final_bw    = sgm_do_write_r; // byte_write=1 for SGM RAM
 
     wire [15:0] acc_word0;
     reg         write_pending;
@@ -381,7 +385,7 @@ module top (
             // bank — corrupting MARIA tile DMA. Force a full re-fetch on every bank write.
             if (sgm_bank_we) last_req_addr <= 16'hFFFF;
 
-            if (game_loaded && !sgm_doing_write && (a_stable[15] | a_stable[14]) && !psram_busy &&
+            if (game_loaded && !sgm_do_write_r && (a_stable[15] | a_stable[14]) && !psram_busy &&
                 (a_stable != last_req_addr || (!game_loaded_d && game_loaded))) begin
                 psram_rd_req <= 1;
                 last_req_addr <= a_stable;
