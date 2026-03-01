@@ -372,6 +372,15 @@ module top (
             // Also fire on rising edge of game_loaded ($FFFC reset vector may already be stable).
             // Gate: don't trigger a read while an SGM RAM write is pending — both can't
             // use PSRAM simultaneously, and the write has priority.
+            //
+            // SGM BANK SWITCH CACHE INVALIDATION:
+            // last_req_addr tracks only a_stable, not the effective PSRAM address.
+            // After a SuperGame bank switch the same CPU address maps to a different
+            // PSRAM location. Without invalidation the read trigger sees
+            // a_stable == last_req_addr and silently serves stale data from the old
+            // bank — corrupting MARIA tile DMA. Force a full re-fetch on every bank write.
+            if (sgm_bank_we) last_req_addr <= 16'hFFFF;
+
             if (game_loaded && !sgm_doing_write && (a_stable[15] | a_stable[14]) && !psram_busy &&
                 (a_stable != last_req_addr || (!game_loaded_d && game_loaded))) begin
                 psram_rd_req <= 1;
