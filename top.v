@@ -101,6 +101,50 @@ module top (
     wire [15:0] cart_pokey_addr;
     wire [3:0]  cart_mapper;        // 0=standard, 1=SuperGame
     wire        cart_ram_at_4000;   // 1=16KB RAM mapped at $4000-$7FFF
+
+    // SuperGame (SGM) decode
+    wire is_sgm = (cart_mapper == 4'd1);
+
+    // -----------------------------------------------------------------------
+    // SuperGame bank register
+    // Any CPU write to $8000-$BFFF sets bank_reg to d[3:0].
+    // The banked 16KB window at $8000-$BFFF maps to PSRAM bank*16KB.
+    // -----------------------------------------------------------------------
+    reg [3:0] bank_reg;
+    wire sgm_bank_we = is_sgm && game_loaded && !rw_safe && phi2_safe
+                       && (a_stable[15:14] == 2'b10); // $8000-$BFFF
+    always @(posedge sys_clk) begin
+        if (!pll_lock) bank_reg <= 4'd0;
+        else if (sgm_bank_we) bank_reg <= d[3:0];
+    end
+
+    // -----------------------------------------------------------------------
+    // SuperGame RAM write path
+    // CPU writes to $4000-$7FFF (cart_ram_at_4000 set) → PSRAM 0x40000.
+    // We latch the write on the rising edge of the CPU write strobe and
+    // issue a byte-write to PSRAM when the bus is free.
+    // Layout: ROM 0x00000-0x3FFFF (256KB), SGM RAM 0x40000-0x43FFF (16KB).
+    // -----------------------------------------------------------------------
+    reg       sgm_wr_pending;
+    reg [21:0] sgm_wr_addr;
+    reg [7:0]  sgm_wr_byte;
+    reg        sgm_ram_we_prev;
+    wire sgm_ram_we_wire = is_sgm && cart_ram_at_4000 && game_loaded
+                           && !rw_safe && phi2_safe
+                           && (a_stable[15:14] == 2'b01); // $4000-$7FFF
+    always @(posedge sys_clk) begin
+        sgm_ram_we_prev <= sgm_ram_we_wire;
+        if (!pll_lock) begin
+            sgm_wr_pending <= 0;
+        end else if (sgm_ram_we_wire && !sgm_ram_we_prev) begin
+            // Rising edge of CPU write: latch address and data
+            sgm_wr_pending <= 1;
+            sgm_wr_addr    <= {4'b0001, 4'b0000, a_stable[13:0]}; // PSRAM 0x40000+offset
+            sgm_wr_byte    <= d;
+        end else if (sgm_wr_pending && !psram_busy) begin
+            sgm_wr_pending <= 0;
+        end
+    end
     
 
 
@@ -248,16 +292,36 @@ module top (
     
     // PSRAM Address
     wire [22:0] psram_write_addr_latched;
-    // Drive addr from live a_stable in game mode — the PsramController latches addr
-    // internally at the start of each operation, so this is safe.
+
+    // SuperGame read-address calculation:
+    //   $4000-$7FFF → PSRAM 0x40000 + offset  (SGM RAM)  bits: {4'b0001, 4'b0000, offset[13:0]}
+    //   $8000-$BFFF → PSRAM bank*16K + offset  (banked)  bits: {4'b0000, bank_reg, offset[13:0]}
+    //   $C000-$FFFF → PSRAM 0x3C000 + offset   (fixed)   bits: {4'b0000, 4'b1111, offset[13:0]}
+    // All three regions have the same a_stable[13:0] offset within their 16KB bank.
+    wire [21:0] psram_sgm_addr =
+        (a_stable[15:14] == 2'b01) ? {4'b0001, 4'b0000, a_stable[13:0]} :
+        (a_stable[15:14] == 2'b10) ? {4'b0000, bank_reg, a_stable[13:0]} :
+                                     {4'b0000, 4'b1111,  a_stable[13:0]};
+
+    // Drive addr from live a_stable — PsramController latches internally at start of op.
     wire [21:0] psram_addr_mux = game_loaded
-        ? ({6'b0, a_stable} - 22'h004000)
+        ? (is_sgm ? psram_sgm_addr : ({6'b0, a_stable} - 22'h004000))
         : psram_write_addr_latched[21:0];
     wire [22:0] psram_cmd_addr = {1'b0, psram_addr_mux};
-    
+
+    // SGM write arbitration: when a SGM RAM write is pending and bus is free, fire it.
+    // Gate: do not overlap with ongoing PSRAM operations.
+    wire sgm_doing_write = sgm_wr_pending && !psram_busy;
+
+    // Final signals to PsramController — SGM writes take priority over reads.
+    wire        psram_final_write = psram_wr_req || sgm_doing_write;
+    wire [21:0] psram_final_addr  = sgm_doing_write ? sgm_wr_addr              : psram_cmd_addr[21:0];
+    wire [15:0] psram_final_din   = sgm_doing_write ? {sgm_wr_byte, sgm_wr_byte}: acc_word0;
+    wire        psram_final_bw    = sgm_doing_write; // byte_write=1 for SGM RAM
+
     wire [15:0] acc_word0;
-    reg write_pending;
-    reg [7:0] ip_data_buffer;
+    reg         write_pending;
+    reg [7:0]   ip_data_buffer;
 
     // Instantiate Custom PSRAM Controller
     PsramController #(
@@ -267,11 +331,11 @@ module top (
         .clk(clk_81m),
         .clk_p(clk_81m_shifted),
         .resetn(pll_lock),
-        .read(psram_cmd_read),    // Use 81MHz Synchronized Pulse
-        .write(psram_cmd_write),  // Use 81MHz Synchronized Pulse
-        .addr(psram_cmd_addr[21:0]),
-        .din(acc_word0[15:0]),
-        .byte_write(1'b0),
+        .read(psram_cmd_read),
+        .write(psram_final_write),
+        .addr(psram_final_addr),
+        .din(psram_final_din),
+        .byte_write(psram_final_bw),
         .dout(psram_dout_16),
         .busy(psram_busy_raw),    // Raw 81MHz output to be synchronized down to 27MHz
         .O_psram_ck(O_psram_ck),
@@ -306,7 +370,9 @@ module top (
             // Every address change fires a fresh read; psram_cmd_addr[0] = a_stable[0]
             // always selects the correct byte from the returned 16-bit word.
             // Also fire on rising edge of game_loaded ($FFFC reset vector may already be stable).
-            if (game_loaded && (a_stable[15] | a_stable[14]) && !psram_busy &&
+            // Gate: don't trigger a read while an SGM RAM write is pending — both can't
+            // use PSRAM simultaneously, and the write has priority.
+            if (game_loaded && !sgm_doing_write && (a_stable[15] | a_stable[14]) && !psram_busy &&
                 (a_stable != last_req_addr || (!game_loaded_d && game_loaded))) begin
                 psram_rd_req <= 1;
                 last_req_addr <= a_stable;
