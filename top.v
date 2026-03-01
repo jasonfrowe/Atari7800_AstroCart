@@ -374,20 +374,18 @@ module top (
             // Every address change fires a fresh read; psram_cmd_addr[0] = a_stable[0]
             // always selects the correct byte from the returned 16-bit word.
             // Also fire on rising edge of game_loaded ($FFFC reset vector may already be stable).
-            // Gate: don't trigger a read while an SGM RAM write is pending — both can't
-            // use PSRAM simultaneously, and the write has priority.
-            //
-            // SGM BANK SWITCH CACHE INVALIDATION:
-            // last_req_addr tracks only a_stable, not the effective PSRAM address.
-            // After a SuperGame bank switch the same CPU address maps to a different
-            // PSRAM location. We must force a full re-fetch on every bank write.
-            //
-            // CRITICAL: the read trigger and the invalidation are both non-blocking
-            // assignments to last_req_addr in the same always block. In Verilog, the
-            // LAST assignment wins. To ensure invalidation always wins:
-            //   (a) gate the read trigger with !sgm_bank_we so both never fire together,
-            //   (b) place the invalidation AFTER the read trigger in source order.
-            if (game_loaded && !sgm_bank_we && !sgm_do_write_r && (a_stable[15] | a_stable[14]) && !psram_busy &&
+            // Gate reads: a SGM RAM write is "pending" even before sgm_do_write_r
+            // fires. On the cycle where sgm_wr_pending && !psram_busy is true, the
+            // SM schedules sgm_do_write_r=1 for NEXT cycle. But sgm_do_write_r is
+            // still 0 THIS cycle, so without gating on !sgm_wr_pending the read
+            // trigger can also fire this same cycle. Both effects land next cycle:
+            // PSRAM controller sees write+read simultaneously, write wins. The read
+            // is lost, but last_req_addr was already updated to a_stable — so the
+            // read never re-fires. MARIA gets stale data → corrupted tiles → crash.
+            // Fix: gate reads on !sgm_wr_pending (covers both the pending and the
+            // do_write_r pulse) so reads and writes are always mutually exclusive.
+            if (game_loaded && !sgm_bank_we && !sgm_wr_pending && !sgm_do_write_r &&
+                (a_stable[15] | a_stable[14]) && !psram_busy &&
                 (a_stable != last_req_addr || (!game_loaded_d && game_loaded))) begin
                 psram_rd_req <= 1;
                 last_req_addr <= a_stable;
