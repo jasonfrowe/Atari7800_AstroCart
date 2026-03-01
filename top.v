@@ -258,8 +258,6 @@ module top (
     wire [15:0] acc_word0;
     reg write_pending;
     reg [7:0] ip_data_buffer;
-    reg [15:0] psram_word_buf; // word latched when busy falls — stable, glitch-free
-    reg psram_busy_prev;
 
     // Instantiate Custom PSRAM Controller
     PsramController #(
@@ -286,32 +284,16 @@ module top (
     assign O_psram_reset_n = 1'b1;
     
     // Data Capture Logic
-    //
-    // psram_word_buf: registers the full 16-bit word from the PSRAM controller
-    // one cycle after busy falls.  psram_dout_16 transitions on the same edge
-    // that busy falls (the controller writes dout and sets state=IDLE in the same
-    // always block), so sampling it combinationally glitches d for ~12ns — just
-    // enough to corrupt a byte the Atari is sampling (the "snow").  Registering
-    // one cycle later captures fully-settled data.
-    //
-    // Byte selection uses LIVE a_stable[0], NOT a registered last_req_lsb.
-    // Why: the PSRAM controller returns a full word containing BOTH the even and
-    // odd byte.  When the CPU fetches sequential bytes A (even) then A+1 (odd),
-    // both bytes are already in psram_word_buf from the read for A.  Using live
-    // a_stable[0] immediately selects the correct byte the moment the address
-    // changes to A+1 — zero extra cycles, no new read needed for that byte.
-    // A registered LSB would instead hold 0 (for A), serving data[A] for A+1
-    // while a new 12–15 cycle read was in flight — wrong byte, causes crashes.
-    // The read for A+1 still fires (last_req_addr tracks per byte), returns the
-    // same word, and psram_word_buf is refreshed — consistent state throughout.
-    always @(posedge sys_clk) begin
-        psram_busy_prev <= psram_busy;
-        if (!psram_busy && psram_busy_prev)  // falling edge: dout settled
-            psram_word_buf <= psram_dout_16;
-    end
-
+    // Use live psram_dout_16 with live a_stable[0] for byte selection.
+    // This matches the original working approach (commit 340c9ba).
+    // psram_dout_16 holds its value between reads (PsramController keeps dout
+    // stable in IDLE state), so the bus is always valid. The 1-cycle transition
+    // glitch when a new read completes is ~12ns — far below the Atari's ~280ns
+    // data hold window and causes no issues in practice.
+    // Using a registered word buffer instead causes a 12-15 cycle startup window
+    // where the buffer is 0x00, making the CPU read BRK as the reset vector.
     always @* begin
-        ip_data_buffer = a_stable[0] ? psram_word_buf[15:8] : psram_word_buf[7:0];
+        ip_data_buffer = psram_cmd_addr[0] ? psram_dout_16[15:8] : psram_dout_16[7:0];
     end
 
     // PSRAM Read/Write Logic
