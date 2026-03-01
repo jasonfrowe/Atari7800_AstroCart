@@ -82,35 +82,11 @@ module top (
     
     // Handover Registers
     reg busy;
-    reg armed;
-    wire [3:0] sd_state; // Moved up for visibility
+    wire [3:0] sd_state;
     
     // Status Byte: 0x00=Busy (Loading), 0x80=Done/Ready
     wire [7:0] status_byte = busy ? 8'h00 : 8'h80;
 
-    // Checksum Logic
-
-    // Diagnostics Wires from Cart Loader
-    wire [9:0] byte_index;
-    wire [9:0] current_sector;
-    wire [7:0] last_byte_captured;
-    wire [31:0] checksum;
-    wire [31:0] psram_checksum;
-    wire [22:0] crc_address;
-    wire crc_scan_req;
-    
-    wire [31:0] latch_p2;
-    wire [31:0] latch_p3;
-    wire [7:0]  latch_p4 = psram_write_addr_latched[15:8]; // P4 is mid address
-    wire [7:0]  latch_p5;
-    wire [7:0]  latch_p6;
-    wire [31:0] latch_p7;
-    
-    wire [7:0] first_bytes_0;
-    wire [7:0] first_bytes_1;
-    wire [7:0] first_bytes_2;
-    wire [7:0] first_bytes_3;
-    
     wire game_loaded;
     wire switch_pending;
     
@@ -124,28 +100,7 @@ module top (
     wire cart_has_pokey;
     wire [15:0] cart_pokey_addr;
     
-    // Hex-to-ASCII converter helper
-    wire [7:0] diag_data_out;
-    diag_rom diag_inst (
-        .a_stable(a_stable), // Glitch suppressed address
-        .sd_state(sd_state),
-        .byte_index(byte_index),
-        .current_sector(current_sector),
-        .last_byte_captured(last_byte_captured),
-        .checksum(checksum),
-        .psram_checksum(psram_checksum),
-        .latch_p2(latch_p2),
-        .latch_p3(latch_p3),
-        .latch_p4(latch_p4),
-        .latch_p5(latch_p5),
-        .latch_p6(latch_p6),
-        .latch_p7(latch_p7),
-        .fb0(first_bytes_0),
-        .fb1(first_bytes_1),
-        .fb2(first_bytes_2),
-        .fb3(first_bytes_3),
-        .data_out(diag_data_out)
-    );
+
 
     // ROM Fetch / PSRAM Read / Status Read
     always @(posedge sys_clk) begin
@@ -155,14 +110,8 @@ module top (
             if (bram_addr >= 16'h4000) rom_memory[bram_addr - 16'h4000] <= bram_data;
         end
         
-        if (game_loaded) begin
-             // [OPTIMIZATION] Fast Data Capture: Bypass synced latch entirely
-             // Data connects directly combinationally to the FPGA pins from ip_data_buffer
-             // data_out <= ip_data_buffer; 
-        end else begin
-            // --- DIAGNOSTIC ROM OVERRIDE ---
-            if (a_stable >= 16'h7F00 && a_stable <= 16'h7FBF) data_out <= diag_data_out;
-            else if (a_stable == 16'h7FF0) data_out <= status_byte; // [NEW] Polling Address for Menu
+        if (!game_loaded) begin
+            if (a_stable == 16'h7FF0) data_out <= status_byte;
             else if (rom_index < 49152) data_out <= rom_memory[rom_index];
             else data_out <= 8'hFF;
         end
@@ -224,13 +173,39 @@ module top (
         else clk_div <= clk_div + 1;
     end
 
+    // POKEY Pulse Stretcher
+    // tick_179 fires every 45 sys_clk (~556ns). A CPU write pulse via phi2_safe is
+    // ~22 sys_clk wide (~272ns) — a <50% window. Without stretching there's a >50%
+    // chance tick_179 never fires while pokey_we is high, causing the write to be missed.
+    // On the rising edge of pokey_we we latch the stable bus values, then hold
+    // pokey_we_stretch high until tick_179 fires (guaranteeing POKEY consumes the write).
+    reg       pokey_we_stretch;
+    reg [7:0] pokey_din_latched;
+    reg [3:0] pokey_addr_latched;
+    reg       pokey_we_prev;
+
+    always @(posedge sys_clk) begin
+        pokey_we_prev <= pokey_we;
+        if (!pll_lock) begin
+            pokey_we_stretch <= 0;
+        end else if (pokey_we && !pokey_we_prev) begin
+            // Rising edge: latch stable bus values and start stretching
+            pokey_din_latched  <= d;
+            pokey_addr_latched <= a_stable[3:0];
+            pokey_we_stretch   <= 1;
+        end else if (pokey_we_stretch && tick_179) begin
+            // POKEY's internal clock just ticked while we held write high — write consumed
+            pokey_we_stretch <= 0;
+        end
+    end
+
     pokey_advanced my_pokey (
         .clk(sys_clk),
         .enable_179mhz(tick_179),
         .reset_n(pll_lock),
-        .addr(a_stable[3:0]),  // Register 0-F
-        .din(d),             // Input Data (from Atari)
-        .we(pokey_we),       // Synchronized Write Enable
+        .addr(pokey_addr_latched),
+        .din(pokey_din_latched),
+        .we(pokey_we_stretch),        // Pulse-stretched write enable
         .audio_pwm(audio)
     );
 
@@ -260,8 +235,6 @@ module top (
     wire [15:0] psram_dout_16;
     
     // PSRAM Interface Signals
-    wire [7:0] psram_dout = psram_cmd_addr[0] ? psram_dout_16[15:8] : psram_dout_16[7:0];
-    
     // --- Clock Domain Crossing (CDC) ---
     // [OPTIMIZATION] Removed CDC logic as sys_clk is now 81MHz (same as PSRAM)
     wire psram_cmd_write = psram_wr_req;
@@ -271,47 +244,17 @@ module top (
     wire psram_busy_raw;
     wire psram_busy = psram_busy_raw;
     
-    // [FIX 4] Latch Address for IP Stability
-    // We cannot drive IP address directly from 'a_safe' via MUX because 'a_safe' changes
-    // while IP is busy. We must latch it.
-    reg [22:0] latched_ip_addr_reg; // V68: Fixed width to 23 bits
-    
-    // V94: Use sd_state to determine CRC mode. This is stable and robust.
-    // SD_CRC_START(6), SD_CRC_WAIT(7), SD_CRC_NEXT(8)
-    wire is_crc_mode = (sd_state >= 4'd6 && sd_state <= 4'd8);
-    wire [22:0] psram_cmd_addr = (is_crc_mode) ? crc_address : {1'b0, psram_addr_mux};
-    
-    wire is_psram_diag0 = (!game_loaded && a_stable >= 16'h7F40 && a_stable <= 16'h7F4F);
-    wire is_psram_diag1 = (!game_loaded && a_stable >= 16'h7F50 && a_stable <= 16'h7F5F);
-    wire is_psram_diag2 = (!game_loaded && a_stable >= 16'h7F60 && a_stable <= 16'h7F6F);
-    wire is_psram_diag3 = (!game_loaded && a_stable >= 16'h7F70 && a_stable <= 16'h7F7F);
-    wire is_psram_diag4 = (!game_loaded && a_stable >= 16'h7F80 && a_stable <= 16'h7F8F);
-    wire is_psram_diag5 = (!game_loaded && a_stable >= 16'h7F90 && a_stable <= 16'h7F9F);
-    wire is_psram_diag6 = (!game_loaded && a_stable >= 16'h7FA0 && a_stable <= 16'h7FAF);
-    wire is_psram_diag7 = (!game_loaded && a_stable >= 16'h7FB0 && a_stable <= 16'h7FBF);
-    
-    // [FIX 2] Simplified Address Mux
-    // P2(Diag2), P3(Diag3), P7(Diag6) ALL READ ADDRESS 0
-    // V62: Use LATCHED write address for IP to avoid race with loop increment
+    // PSRAM Address
     wire [22:0] psram_write_addr_latched;
+    // Drive addr from live a_stable in game mode — the PsramController latches addr
+    // internally at the start of each operation, so this is safe.
+    wire [21:0] psram_addr_mux = game_loaded
+        ? ({6'b0, a_stable} - 22'h004000)
+        : psram_write_addr_latched[21:0];
+    wire [22:0] psram_cmd_addr = {1'b0, psram_addr_mux};
     
-    wire [21:0] psram_addr_mux = (game_loaded)   ? {6'b0, a_stable} - 22'h004000 : 
-                                 (busy)          ? {psram_write_addr_latched[21:0]} : // [FIX] Priority for loader
-                                 (is_psram_diag0) ? 22'h000000 : 
-                                 (is_psram_diag1) ? 22'h000001 : 
-                                 (is_psram_diag2) ? 22'h000000 : 
-                                 (is_psram_diag3) ? 22'h000000 : 
-                                 (is_psram_diag4) ? 22'h000000 : 
-                                 (is_psram_diag6) ? 22'h000000 : 
-                                 {psram_write_addr_latched[21:0]};
-    
-    reg [7:0] psram_read_latch;
-    
-    wire [15:0] acc_word0; // Reduced to 16-bit for custom controller
-    reg [22:0] burst_start_addr; 
- 
+    wire [15:0] acc_word0;
     reg write_pending;
-    
     reg [7:0] ip_data_buffer;
 
     // Instantiate Custom PSRAM Controller
@@ -340,142 +283,37 @@ module top (
     
     // Data Capture Logic
     always @* begin
-        // Simple byte selection from 16-bit word
-        ip_data_buffer = (psram_cmd_addr[0]) ? psram_dout_16[15:8] : psram_dout_16[7:0];
+        ip_data_buffer = psram_cmd_addr[0] ? psram_dout_16[15:8] : psram_dout_16[7:0];
     end
 
-    // PSRAM Read/Write Logic (CDC Handshake)
-    
-    // 1. Read Logic (Game Mode)
-    // Trigger read on Address Change (Prefetch) to gain timing margin.
-    reg should_drive_d;
-    always @(posedge sys_clk) should_drive_d <= should_drive;
-    
-    reg [15:0] a_prev; // Used for edge detection
-    reg rw_prev;
-    
-    // Diagnostic read-once latches (prevent continuous re-reading)
-    reg diag0_read_done;
-    reg diag1_read_done;
-    reg diag2_read_done;
-    reg diag3_read_done;
-    reg diag4_read_done;
-    reg diag5_read_done;
-    reg diag6_read_done;
-    reg diag7_read_done;
-    reg p7_one_shot_fired; // Added for persistent capture
-    
-    // Detect when we're in any diagnostic region
-    wire in_any_diag = is_psram_diag0 || is_psram_diag1 || is_psram_diag2 || is_psram_diag3 ||
-                       is_psram_diag4 || is_psram_diag5 || is_psram_diag6 || is_psram_diag7;
-    
-    // Only trigger read once per entry to diagnostic region AND only when cart_loader is NOT busy
-    wire diag_read_trigger = !game_loaded && rw_safe && !busy && 
-                            ((is_psram_diag0 && !diag0_read_done) ||
-                             (is_psram_diag1 && !diag1_read_done) ||
-                             (is_psram_diag2 && !diag2_read_done) ||
-                             (is_psram_diag3 && !diag3_read_done) ||
-                             (is_psram_diag4 && !diag4_read_done) ||
-                             (is_psram_diag5 && !diag5_read_done) ||
-                             (is_psram_diag6 && !p7_one_shot_fired) || // Use persistent one-shot flag
-                             (is_psram_diag7 && !diag7_read_done));
-    
-    reg [7:0] trigger_counter;
-    reg [11:0] diag_exit_timer;
-    
-    // V52: Dedicated Diagnostic Latches
-    // V52: Dedicated Diagnostic Latches
-    reg [2:0] active_req_source; // V71: Extended to 3 bits (support up to 7)
-    
+    // PSRAM Read/Write Logic
     reg [15:0] last_req_addr;
-    reg last_req_rw;
-    
-    // Capture diagnostic data on falling edge of busy
-    reg psram_busy_d;
-    always @(posedge sys_clk) begin
-        psram_busy_d <= psram_busy;
-        if (psram_busy_d && !psram_busy) begin
-        end
-    end
+    reg game_loaded_d;
     
     always @(posedge sys_clk) begin
-        a_prev <= a_stable;
-        rw_prev <= rw_safe;
+        game_loaded_d <= game_loaded;
         
-        // Reset diagnostic read-done flags ONLY on System Reset or new SD Load
-        if (sd_reset || (sd_state == 4'd1 && current_sector == 0)) begin // 4'd1 = SD_START
-            diag0_read_done <= 0;
-            diag1_read_done <= 0;
-            diag2_read_done <= 0;
-            diag3_read_done <= 0;
-            diag4_read_done <= 0;
-            diag5_read_done <= 0;
-            diag6_read_done <= 0;
-            diag7_read_done <= 0;
-            p7_one_shot_fired <= 0;
-            last_req_addr <= 16'hFFFF; // Force initial mismatch
-            last_req_rw <= 1'b0;
-        end
-        
-        // [FIX 1] Clear Source in the SAME BLOCK to avoid Multi-Driver error
-        // V94: Simplified clear. We no longer use source 6 for CRC.
-        if (!psram_busy) active_req_source <= 0;
-        
-        if (!sd_reset) begin
-             // READ REQUEST (Trigger on Address change, OR diag peak)
-             // CRITICAL FIX: PREFETCH ENABLED
-             // We trigger the read the moment `a_safe` changes, regardless of `phi2` state.
-             // The 6502 asserts the address during PHI1 (or late PHI2 of prev cycle). 
-             // We want the 750ns PSRAM IP to start working IMMEDIATELY.
-             // READ REQUEST (Trigger on Address change, OR diag peak)
-             if ((game_loaded && (a_stable[15] | a_stable[14]) && !psram_busy && (a_stable != last_req_addr)) || 
-                 (diag_read_trigger && !psram_busy) ||
-                 (crc_scan_req && !psram_busy)) begin
-                   psram_rd_req <= 1;
-                   last_req_addr <= a_stable; // Record the STABLE address
-                   last_req_rw <= rw_safe;
-                   
-                   // Mark diagnostic region as read & Set Source
-                   if (diag_read_trigger) begin
-                       trigger_counter <= trigger_counter + 1;
-                       if (is_psram_diag0) diag0_read_done <= 1;
-                       if (is_psram_diag1) diag1_read_done <= 1;
-                       
-                       if (is_psram_diag2) begin
-                           diag2_read_done <= 1;
-                           active_req_source <= 3'd1; // P2 Request
-                       end
-                       
-                       if (is_psram_diag3) begin
-                           diag3_read_done <= 1;
-                           active_req_source <= 3'd2; // P3 Request
-                       end
-                       
-                       if (is_psram_diag4) begin 
-                           diag4_read_done <= 1;
-                           active_req_source <= 3'd4; // P4 Request
-                       end
-                       
-                       if (is_psram_diag5) begin
-                           diag5_read_done <= 1;
-                           active_req_source <= 3'd5; // P5 Request
-                       end
-                       if (is_psram_diag6 && !p7_one_shot_fired) begin 
-                           diag6_read_done <= 1;
-                           p7_one_shot_fired <= 1; // Mark as fired permanently until reset
-                           active_req_source <= 3'd3; 
-                       end
-                       
-                       if (is_psram_diag7) diag7_read_done <= 1;
-                   end
-             end
-             else if (psram_busy) begin 
-                   // Safely clear request once acknowledged by the state machine
-                   psram_rd_req <= 0; 
-             end
-             else if (!game_loaded && !in_any_diag) psram_rd_req <= 0; // Menu Mode safety (but allow diagnostics)
+        if (sd_reset) begin
+            last_req_addr <= 16'hFFFF;
         end else begin
-             p7_one_shot_fired <= 0;
+            // Prefetch: trigger PSRAM read on every address change.
+            // Full 16-bit comparison (not word-boundary) is required because MARIA performs
+            // non-sequential DMA — it jumps between distant ROM addresses. Using word-boundary
+            // comparison allows psram_dout_16 to be silently overwritten by an intervening
+            // read before the odd byte is served, returning stale data.
+            // Every address change fires a fresh read; psram_cmd_addr[0] = a_stable[0]
+            // always selects the correct byte from the returned 16-bit word.
+            // Also fire on rising edge of game_loaded ($FFFC reset vector may already be stable).
+            if (game_loaded && (a_stable[15] | a_stable[14]) && !psram_busy &&
+                (a_stable != last_req_addr || (!game_loaded_d && game_loaded))) begin
+                psram_rd_req <= 1;
+                last_req_addr <= a_stable;
+            end else if (psram_busy) begin
+                psram_rd_req <= 0;
+            end else if (!game_loaded) begin
+                psram_rd_req <= 0;
+                last_req_addr <= 16'hFFFF;
+            end
         end
     end
 
@@ -486,14 +324,6 @@ module top (
     // Or just use psram_dout_bus directly in data_out assignments?
     // Let's use `psram_dout_bus` directly, as it holds value.
 
-    
-    // TEST: Direct clock output to verify pin connection
-    reg test_clk = 0;
-    reg [3:0] test_div = 0;
-    always @(posedge sys_clk) begin
-        test_div <= test_div + 1;
-        if (test_div == 0) test_clk <= ~test_clk;  // Much slower test clock (~1.6MHz)
-    end
     
     // SD Controller signals
 
@@ -522,30 +352,10 @@ module top (
         .psram_wr_req(psram_wr_req),
         .psram_write_addr_latched(psram_write_addr_latched),
         .acc_word0(acc_word0),
-        .psram_dout_16(psram_dout_16),
         
         .game_loaded(game_loaded),
         .switch_pending(switch_pending),
         .sd_state(sd_state),
-        .current_sector(current_sector),
-        .byte_index(byte_index),
-        .checksum(checksum),
-        .last_byte_captured(last_byte_captured),
-        .psram_checksum(psram_checksum),
-        .crc_address(crc_address),
-        .crc_scan_req(crc_scan_req),
-        
-        .latch_p2(latch_p2),
-        .latch_p3(latch_p3),
-        .latch_p5(latch_p5),
-        .latch_p6(latch_p6),
-        .latch_p7(latch_p7),
-        
-        .fb0(first_bytes_0),
-        .fb1(first_bytes_1),
-        .fb2(first_bytes_2),
-        .fb3(first_bytes_3),
-        
         .busy(busy),
         .write_pending(write_pending_loader),
         

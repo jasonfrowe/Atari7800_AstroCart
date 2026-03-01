@@ -16,45 +16,25 @@ module cart_loader (
     input        sd_miso,
     output       sd_clk,
     
-    // PSRAM physical interface
+    // PSRAM write interface (reads handled by top.v directly)
     input        psram_busy,
     output reg   psram_wr_req,
     output reg [22:0] psram_write_addr_latched,
     output reg [15:0] acc_word0,
-    input [15:0] psram_dout_16,
     
-    // Status/Debug outputs used in top.v
+    // Status outputs
     output reg   game_loaded,
     output reg   switch_pending,
     output reg [3:0] sd_state,
-    output reg [9:0] current_sector,
-    output reg [9:0] byte_index,
-    output reg [31:0] checksum,
-    output reg [7:0] last_byte_captured,
-    output reg [31:0] psram_checksum,
-    output reg [22:0] crc_address,
-    output reg crc_scan_req,
+    output reg   busy,
+    output reg   write_pending,
     
-    // Diagnostic latches
-    output reg [31:0] latch_p2,
-    output reg [31:0] latch_p3,
-    output reg [7:0]  latch_p5,
-    output reg [7:0]  latch_p6,
-    output reg [31:0] latch_p7,
-    
-    // First Bytes
-    output reg [7:0] fb0, output reg [7:0] fb1, output reg [7:0] fb2, output reg [7:0] fb3,
-    
-    // Flags
-    output reg busy,
-    output reg write_pending // passed to smart_blinkers
-    ,
-    // BRAM Write Interface (for Menu Building)
+    // BRAM Write Interface (title scan -> menu RAM)
     output reg bram_we,
     output reg [15:0] bram_addr,
     output reg [7:0] bram_data,
 
-    // Header Info
+    // Cart configuration (from header)
     output reg [31:0] cart_rom_size,
     output reg cart_has_pokey,
     output reg [15:0] cart_pokey_addr
@@ -65,12 +45,10 @@ module cart_loader (
     wire [7:0] sd_dout;
     wire sd_byte_available;
     wire [4:0] sd_status;
-    wire [7:0] sd_recv_data;
     
     reg sd_rd;
     reg [31:0] sd_address;
     wire sd_sclk_internal;
-    reg crc_busy_wait;
 
     sd_controller sd_ctrl (
         .cs(sd_cs),
@@ -88,7 +66,7 @@ module cart_loader (
         .address(sd_address),
         .clk(clk_sd),
         .status(sd_status),
-        .recv_data(sd_recv_data)
+        .recv_data()
     );
     assign sd_clk = sd_sclk_internal;
 
@@ -99,16 +77,16 @@ module cart_loader (
     localparam SD_DATA       = 3;
     localparam SD_NEXT       = 4;
     localparam SD_COMPLETE   = 5;
-
-    localparam SD_CRC_START  = 6;
-    localparam SD_CRC_WAIT   = 7;
-    localparam SD_CRC_NEXT   = 8;
-    localparam SD_DRAIN      = 9; // [FIX] Wait for last write to finish
+    localparam SD_DRAIN      = 9; // Wait for last PSRAM write to commit
     
     localparam SD_SCAN_START = 10;
     localparam SD_SCAN_WAIT  = 11;
     localparam SD_SCAN_DATA  = 12;
     localparam SD_SCAN_NEXT  = 13;
+
+    // Internal tracking registers
+    reg [9:0] current_sector;
+    reg [9:0] byte_index;
 
     reg [7:0] sd_dout_reg;
     reg [22:0] psram_load_addr;
@@ -135,15 +113,14 @@ module cart_loader (
         if (reset) begin
              sd_state <= SD_SCAN_START; // Start by scanning headers
              sd_rd <= 0;
-             sd_address <= 1; // [FIX] Initialize for Slot 0 (Block 1)
+             sd_address <= 1;
              byte_index <= 0;
              game_loaded <= 0;
              switch_pending <= 0;
              psram_wr_req <= 0;
-             crc_scan_req <= 0;
              acc_word0 <= 0;
              write_pending <= 0;
-             busy <= 1; // [FIX] Busy during initial scan
+             busy <= 1; // Busy during initial scan
              
              trigger_we_prev <= 0;
              trigger_eval <= 0;
@@ -151,7 +128,6 @@ module cart_loader (
              
              current_sector <= 0;
              psram_load_addr <= 23'h000000;
-             checksum <= 0;
              sd_dout_reg <= 0;
              drain_timer <= 0;
              
@@ -160,8 +136,8 @@ module cart_loader (
              bram_addr <= 0;
              bram_data <= 0;
 
-             cart_rom_size <= 49152; // Default to 48K
-             cart_has_pokey <= 1;    // Default to POKEY enabled (safe for Astro Wing)
+             cart_rom_size <= 49152;
+             cart_has_pokey <= 1;
              cart_pokey_addr <= 16'h0450;
         end else begin
              trigger_we_prev <= trigger_we;
@@ -209,7 +185,6 @@ module cart_loader (
                             
                             sd_state <= SD_START;
                             busy <= 1;
-                            checksum <= 0;
                             psram_load_addr <= 0;
                             
                             cart_rom_size <= 49152;
@@ -218,22 +193,19 @@ module cart_loader (
                         end
                         else if (d_latched == 8'h5A) begin
                              // RELOAD: Magic Key 0x5A
-                             sd_address <= 1; // Default to Game 0
+                             sd_address <= 1;
                              sd_state <= SD_START;
                              current_sector <= 0;
                              psram_load_addr <= 23'h000000;
-                             checksum <= 0;
                              busy <= 1;
-                             game_loaded <= 0; // Force unload
+                             game_loaded <= 0;
                              switch_pending <= 0;
                         end
-                        // Add catch for $64 (100) soft-reload as well for joystick shortcut
                         else if (d_latched == 8'h40) begin
-                             sd_address <= 1; // Default to Game 0
+                             sd_address <= 1;
                              sd_state <= SD_START;
                              current_sector <= 0;
                              psram_load_addr <= 23'h000000;
-                             checksum <= 0;
                              busy <= 1;
                              game_loaded <= 0;
                              switch_pending <= 0;
@@ -279,16 +251,6 @@ module cart_loader (
                              if (psram_load_addr[0] == 1'b1) begin
                                   write_pending <= 1;
                                   psram_write_addr_latched <= {psram_load_addr[22:1], 1'b0};
-                             end
-                             
-                             checksum <= checksum + sd_dout_reg;
-                             last_byte_captured <= sd_dout_reg;
-                             
-                             if (current_sector == 1) begin
-                                 if (byte_index == 0) fb0 <= sd_dout_reg;
-                                 else if (byte_index == 1) fb1 <= sd_dout_reg;
-                                 else if (byte_index == 2) fb2 <= sd_dout_reg;
-                                 else if (byte_index == 3) fb3 <= sd_dout_reg;
                              end
                              
                              psram_load_addr <= psram_load_addr + 1; 
@@ -350,90 +312,38 @@ module cart_loader (
                           sd_address <= sd_address + 1; // Advance true SD Block Address
                           sd_state <= SD_START;
                       end else begin
-                          sd_state <= SD_DRAIN; // [FIX] Go to drain state instead of CRC start
-                          crc_address <= 23'h000000;
-                          psram_checksum <= 0;
+                          sd_state <= SD_DRAIN;
                           drain_timer <= 0;
                       end
                   end
 
                   SD_DRAIN: begin
-                      // Wait ~400ns (32 cycles @ 81MHz) to ensure last write is fully committed
+                      // Wait ~400ns (32 cycles @ 81MHz) to ensure last write is committed
                       drain_timer <= drain_timer + 1;
-                      if (drain_timer == 32) 
-                          sd_state <= SD_CRC_START;
-                  end
-                  
-                  SD_CRC_START: begin
-                      if (!psram_busy) begin 
-                           // [FIX] Gate CRC scan when game loaded to prevent bus contention
-                           if (!game_loaded) begin
-                               crc_scan_req <= 1;
-                               sd_state <= SD_CRC_WAIT;
-                               crc_busy_wait <= 1; 
-                           end else begin
-                               // If game loaded unexpectedly, abort to complete
-                               sd_state <= SD_COMPLETE;
-                           end
-                      end
-                  end
-                  
-                  SD_CRC_WAIT: begin
-                      // top.v psram_rd_req tracking is handled by top.v. We just wait for busy sequence.
-                      
-                      if (crc_busy_wait) begin
-                          if (psram_busy) begin
-                              crc_busy_wait <= 0; // Saw it assert!
-                              crc_scan_req <= 0; // Safe to drop the request now
-                          end
-                      end
-                      else if (!psram_busy) begin // Now wait for it to fall (read complete)
-                          psram_checksum <= psram_checksum + 
-                                            {24'b0, psram_dout_16[7:0]} + 
-                                            {24'b0, psram_dout_16[15:8]};
-                          latch_p5 <= psram_dout_16[7:0];
-                          
-                          if (crc_address == 23'h000000) latch_p7 <= {16'b0, psram_dout_16};
-                          if (crc_address == 23'h000002) latch_p2 <= {16'b0, psram_dout_16};
-                          if (crc_address == 23'h000004) latch_p3 <= {16'b0, psram_dout_16};
-                                            
-                          sd_state <= SD_CRC_NEXT; // Done with this word
-                      end
-                  end
-                  
-                  SD_CRC_NEXT: begin
-                      if (crc_address < 23'h03FFFE) begin // [FIX] Scan full 256KB
-                          crc_address <= crc_address + 2; 
-                          sd_state <= SD_CRC_START;
-                      end else begin
-                          latch_p6 <= crc_address[7:0];
+                      if (drain_timer == 32) begin
                           sd_state <= SD_COMPLETE;
                           busy <= 0;
                       end
                   end
                  
                  SD_COMPLETE: begin
-                     busy <= 0; // [FIX] Ensure busy is released to prevent address bus contention
-                     crc_scan_req <= 0; // [FIX] Ensure CRC request is dropped
+                     busy <= 0;
                      if (trigger_eval) begin
                          if (!game_loaded && d_latched == 8'hA5) begin
                              switch_pending <= 1;
                          end
                          else if (!game_loaded && (d_latched >= 8'h80 && d_latched <= 8'h8F) && !trigger_lock_active) begin
-                             // User selected a new game from the menu! Re-trigger load.
                              sd_address <= 1 + ((d_latched & 8'h7F) * 1024); 
                              current_sector <= 0;
                              sd_state <= SD_START;
                              busy <= 1;
-                             checksum <= 0;
                              psram_load_addr <= 0;
-                             trigger_lock_active <= 1; // Prevent continuous reloading!
+                             trigger_lock_active <= 1;
                          end
                          else if (d_latched == 8'h5A) begin
                              sd_state <= SD_START;
                              current_sector <= 0;
                              psram_load_addr <= 23'h000000;
-                             checksum <= 0;
                              busy <= 1;
                              game_loaded <= 0; 
                              switch_pending <= 0;
