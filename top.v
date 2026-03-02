@@ -108,15 +108,10 @@ module top (
     // -----------------------------------------------------------------------
     wire is_sgm = (cart_mapper == 4'd1);
 
-    // cart_sgm_fixed_bank is registered in cart_loader at load time
-    // (= last ROM bank index, computed from header size).  Using a registered
-    // value here keeps zero combinational depth on the PSRAM read timing path.
-    wire [3:0] cart_sgm_fixed_bank;
-
     // Bank register — CPU write to $8000-$BFFF latches d[3:0] as the bank
     // number for the switchable window.  Held at 0 until PLL locks.
     reg [3:0] bank_reg;
-    wire sgm_bank_we = is_sgm && game_loaded && !rw_safe
+    wire sgm_bank_we = is_sgm && game_loaded && !rw_safe && phi2_safe
                        && (a_stable[15:14] == 2'b10); // any addr $8000-$BFFF
     always @(posedge sys_clk) begin
         if (!pll_lock || !game_loaded) bank_reg <= 4'd0;  // clear on power-on AND between game loads
@@ -124,13 +119,13 @@ module top (
     end
 
     // SGM read-address mux
-    //   $4000-$7FFF  →  PSRAM 0x40000 + a[13:0]        (16KB RAM, above ROM)
-    //   $8000-$BFFF  →  PSRAM bank_reg*16K + a[13:0]   (switchable ROM bank)
-    //   $C000-$FFFF  →  PSRAM cart_sgm_fixed_bank*16K  (fixed last bank)
+    //   $4000-$7FFF  →  PSRAM 0x40000 + a[13:0]  (16KB RAM above ROM)
+    //   $8000-$BFFF  →  PSRAM bank_reg*16K + a[13:0]  (switchable ROM bank)
+    //   $C000-$FFFF  →  PSRAM 0x3C000 + a[13:0]  (fixed bank 15)
     wire [21:0] psram_sgm_addr =
-        (a_stable[15:14] == 2'b01) ? {4'b0001, 4'b0000,           a_stable[13:0]} :
-        (a_stable[15:14] == 2'b10) ? {4'b0000, bank_reg,           a_stable[13:0]} :
-                                     {4'b0000, cart_sgm_fixed_bank, a_stable[13:0]};
+        (a_stable[15:14] == 2'b01) ? {4'b0001, 4'b0000, a_stable[13:0]} :
+        (a_stable[15:14] == 2'b10) ? {4'b0000, bank_reg, a_stable[13:0]} :
+                                     {4'b0000, 4'b1111,  a_stable[13:0]};
 
     // SGM RAM write path — CPU writes to $4000-$7FFF byte-write PSRAM 0x40000.
     // Uses a registered 1-cycle pulse to avoid combinational loop through busy.
@@ -140,7 +135,7 @@ module top (
     reg [7:0]  sgm_wr_byte_r;
     reg        sgm_ram_we_prev;
     wire sgm_ram_we_wire = is_sgm && cart_ram_at_4000 && game_loaded
-                           && !rw_safe
+                           && !rw_safe && phi2_safe
                            && (a_stable[15:14] == 2'b01); // $4000-$7FFF
     always @(posedge sys_clk) begin
         sgm_ram_we_prev <= sgm_ram_we_wire;
@@ -186,8 +181,8 @@ module top (
     wire should_drive = is_rom && rw_safe;
 
     // Write Enables
-    wire pokey_we   = is_pokey && !rw_safe;
-    wire trigger_we = is_2200  && !rw_safe;
+    wire pokey_we   = is_pokey && !rw_safe && phi2_safe;
+    wire trigger_we = is_2200  && !rw_safe && phi2_safe;
 
     // ========================================================================
     // 4. OUTPUTS
@@ -296,9 +291,9 @@ module top (
     wire [21:0] psram_addr_mux = game_loaded
         ? (is_sgm ? psram_sgm_addr : ({6'b0, a_stable} - 22'h004000))
         : prefetch_active
-            // SGM: $FFFC is in the fixed (last) bank.
-            // Standard: $FFFC - $4000 = $BFFC
-            ? (is_sgm ? {4'b0000, cart_sgm_fixed_bank, 14'h3FFC} : 22'h00BFFC)
+            // SGM: $FFFC is in fixed bank 15 → PSRAM 0x3C000 + 0x3FFC = 0x3FFFC
+            // Standard: $FFFC - $4000 = 0x00BFFC
+            ? (is_sgm ? 22'h03FFFC : 22'h00BFFC)
             : psram_write_addr_latched[21:0];
     wire [22:0] psram_cmd_addr = {1'b0, psram_addr_mux};
 
@@ -390,14 +385,9 @@ module top (
             // address change so ip_data_buffer always reflects the current bus.
             // Gate on !sgm_wr_pending and !sgm_do_write_r to prevent read/write
             // conflicts on the cycle the SGM write pulse fires.
-            // rw_safe guards READ cycles only — WRITE cycles must NOT update
-            // last_req_addr or trigger a spurious PSRAM read.  Without this,
-            // a CPU write to $4000 followed immediately by a read from $4000
-            // would find last_req_addr==$4000 and serve stale pre-write data,
-            // making SGM RAM writes appear to not stick.
             // ---------------------------------------------------------------
             end else if (game_loaded && !sgm_wr_pending && !sgm_do_write_r &&
-                (a_stable[15] | a_stable[14]) && rw_safe && !psram_busy &&
+                (a_stable[15] | a_stable[14]) && !psram_busy &&
                 a_stable != last_req_addr) begin
                 psram_rd_req <= 1;
                 last_req_addr <= a_stable;
@@ -464,8 +454,7 @@ module top (
         .cart_has_pokey(cart_has_pokey),
         .cart_pokey_addr(cart_pokey_addr),
         .cart_mapper(cart_mapper),
-        .cart_ram_at_4000(cart_ram_at_4000),
-        .cart_sgm_fixed_bank(cart_sgm_fixed_bank)
+        .cart_ram_at_4000(cart_ram_at_4000)
     );
     
     always @* write_pending = write_pending_loader;
