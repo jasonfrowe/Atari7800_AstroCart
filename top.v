@@ -390,9 +390,14 @@ module top (
             // address change so ip_data_buffer always reflects the current bus.
             // Gate on !sgm_wr_pending and !sgm_do_write_r to prevent read/write
             // conflicts on the cycle the SGM write pulse fires.
+            // rw_safe guards READ cycles only — WRITE cycles must NOT update
+            // last_req_addr or trigger a spurious PSRAM read.  Without this,
+            // a CPU write to $4000 followed immediately by a read from $4000
+            // would find last_req_addr==$4000 and serve stale pre-write data,
+            // making SGM RAM writes appear to not stick.
             // ---------------------------------------------------------------
             end else if (game_loaded && !sgm_wr_pending && !sgm_do_write_r &&
-                (a_stable[15] | a_stable[14]) && !psram_busy &&
+                (a_stable[15] | a_stable[14]) && rw_safe && !psram_busy &&
                 a_stable != last_req_addr) begin
                 psram_rd_req <= 1;
                 last_req_addr <= a_stable;
