@@ -327,84 +327,76 @@ module top (
     assign O_psram_reset_n = 1'b1;
     
     // Data Capture Logic
-    // ip_data_buffer returns the correct byte from the most recent PSRAM read.
-    // For non-SGM games we return 0xFF for CPU addresses below the game's load
-    // base (open-bus), preventing stale data from a previously-loaded larger
-    // game from being served.  The load base is registered at switch_pending
-    // time (cart_rom_size is fully settled by then) to avoid a deep
-    // combinational path from the cart_loader output at 81MHz.
-    //
-    // Standard layout (ROM end-aligned at $FFFF):
-    //   16KB: loads at $C000  (cpu_rom_base = 16'hC000)
-    //   32KB: loads at $8000  (cpu_rom_base = 16'h8000)
-    //   48KB: loads at $4000  (cpu_rom_base = 16'h4000)
-    reg [15:0] cpu_rom_base;   // lowest CPU address that maps to real ROM data
-    wire addr_in_rom_range = is_sgm || (a_stable >= cpu_rom_base);
+    // Use live psram_dout_16 with live a_stable[0] for byte selection.
+    // This matches the original working approach (commit 340c9ba).
+    // psram_dout_16 holds its value between reads (PsramController keeps dout
+    // stable in IDLE state), so the bus is always valid. The 1-cycle transition
+    // glitch when a new read completes is ~12ns — far below the Atari's ~280ns
+    // data hold window and causes no issues in practice.
+    // Using a registered word buffer instead causes a 12-15 cycle startup window
+    // where the buffer is 0x00, making the CPU read BRK as the reset vector.
     always @* begin
-        if (addr_in_rom_range)
-            ip_data_buffer = psram_cmd_addr[0] ? psram_dout_16[15:8] : psram_dout_16[7:0];
-        else
-            ip_data_buffer = 8'hFF; // open bus — below this game's ROM region
+        ip_data_buffer = psram_cmd_addr[0] ? psram_dout_16[15:8] : psram_dout_16[7:0];
     end
 
     // PSRAM Read/Write Logic
     reg [15:0] last_req_addr;
     reg game_loaded_d;
+    reg switch_pending_prev;
     
     always @(posedge sys_clk) begin
         game_loaded_d <= game_loaded;
+        switch_pending_prev <= switch_pending;
         
         if (sd_reset) begin
             last_req_addr <= 16'hFFFF;
             prefetch_active <= 0;
-            cpu_rom_base <= 16'h4000; // default: 48KB
         end else begin
             // ---------------------------------------------------------------
             // RESET-VECTOR PRE-FETCH
-            // While switch_pending is high (game selected, not yet handed over),
-            // keep trying to pre-fetch $FFFC until it succeeds.  Using a
-            // level-sensitive (not rising-edge) condition means a momentarily
-            // busy PSRAM (e.g. final SD write still committing) no longer causes
-            // the pre-fetch to be permanently skipped for this game load.
+            // When switch_pending rises (from the 0xA5 write to $2200), the
+            // Atari CPU still has several instructions to execute before it
+            // reads $FFFC for the JMP-via-vector handover.  Pre-fetching $FFFC
+            // now gives the PSRAM >450 sys_clk cycles (10+ CPU instructions)
+            // to return the game reset vector long before ip_data_buffer needs
+            // to serve it.
             //
-            // Gate: last_req_addr != $FFFC ensures we fire exactly once per
-            // game load (once it fires, last_req_addr=$FFFC and the gate closes;
-            // it won't reopen until the next reload resets last_req_addr=$FFFF).
+            // Without this, psram_dout_16=0 (never read before, only written
+            // by the loader) when game_loaded=1 fires.  The CPU reads 0x00 as
+            // the reset vector, jumps to $0000 (TIA space), and executes TIA
+            // register values as 6502 opcodes for a few seconds before crashing.
             //
-            // cpu_rom_base is latched here too — cart_rom_size is fully settled
-            // in SD_NEXT long before switch_pending rises.
+            // Setting last_req_addr=$FFFC here prevents a second racy read
+            // when game_loaded=1 fires on the $FFFC bus cycle — no new read
+            // fires, and psram_dout_16 already holds the correct vector data.
             // ---------------------------------------------------------------
-            if (switch_pending && !game_loaded && !psram_busy &&
-                    last_req_addr != 16'hFFFC && !prefetch_active) begin
-                cpu_rom_base    <= 16'h0000 - cart_rom_size[15:0];
+            if (switch_pending && !switch_pending_prev && !psram_busy && !game_loaded) begin
                 psram_rd_req    <= 1;
                 prefetch_active <= 1;
-                last_req_addr   <= 16'hFFFC;
+                last_req_addr   <= 16'hFFFC;  // $FFFC will have been fetched
             end else if (prefetch_active && psram_busy) begin
-                prefetch_active <= 0;
+                prefetch_active <= 0;          // PSRAM accepted the request
                 psram_rd_req    <= 0;
             // ---------------------------------------------------------------
             // Normal game-mode reads: fire a fresh PSRAM read on every
             // address change so ip_data_buffer always reflects the current bus.
             // Gate on !sgm_wr_pending and !sgm_do_write_r to prevent read/write
             // conflicts on the cycle the SGM write pulse fires.
-            // Note: the (!game_loaded_d && game_loaded) rising-edge override
-            // has been removed — the pre-fetch above already serves $FFFC
-            // before game_loaded=1 fires, so forcing a re-read at that moment
-            // would create an unnecessary 12-15 cycle gap of stale data.
             // ---------------------------------------------------------------
             end else if (game_loaded && !sgm_wr_pending && !sgm_do_write_r &&
                 (a_stable[15] | a_stable[14]) && !psram_busy &&
-                a_stable != last_req_addr) begin
+                (a_stable != last_req_addr || (!game_loaded_d && game_loaded))) begin
                 psram_rd_req <= 1;
                 last_req_addr <= a_stable;
             end else if (psram_busy) begin
                 psram_rd_req <= 0;
-            end else if (!game_loaded && !switch_pending) begin
+            end else if (!game_loaded) begin
                 psram_rd_req <= 0;
-                last_req_addr <= 16'hFFFF;
+                if (!switch_pending) last_req_addr <= 16'hFFFF; // preserve during handover
             end
             // Cache invalidation — must come last to win NBA race.
+            // sgm_bank_we:    ROM bank switched, cached read is stale.
+            // sgm_do_write_r: SGM RAM written, re-fetch on next access.
             if (sgm_bank_we || sgm_do_write_r) last_req_addr <= 16'hFFFF;
         end
     end
