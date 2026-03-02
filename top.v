@@ -55,10 +55,6 @@ module top (
     reg [15:0] a_delay;
     reg [15:0] a_stable;
 
-    // Delay pipe for Data Bus — captures stable write data near falling edge of phi2.
-    // Using scalar registers (NOT array) to prevent Gowin block-RAM inference.
-    reg [7:0] d_pipe0, d_pipe1, d_pipe2;
-
     // Run synchronization on FAST clock
     always @(posedge sys_clk) begin
         a_safe    <= a;
@@ -69,11 +65,6 @@ module top (
         // Only accept the address if it hasn't changed for 2 clock ticks (~50ns)
         a_delay <= a_safe;
         if (a_safe == a_delay) a_stable <= a_safe;
-
-        // Shift data bus through pipe — d_pipe2 lags d by 3 cycles (~37ns)
-        d_pipe0 <= d;
-        d_pipe1 <= d_pipe0;
-        d_pipe2 <= d_pipe1;
     end
 
     // ========================================================================
@@ -124,17 +115,12 @@ module top (
 
     // Bank register — CPU write to $8000-$BFFF latches d[3:0] as the bank
     // number for the switchable window.  Held at 0 until PLL locks.
-    // FALLING-EDGE latch: sample d_pipe2 when phi2 falls so write data is fully
-    // settled (6502 data bus can take up to 200ns into phi2 to stabilise).
     reg [3:0] bank_reg;
-    reg sgm_bank_we_prev;
-    wire sgm_bank_we_wire = is_sgm && game_loaded && !rw_safe && phi2_safe
-                            && (a_stable[15:14] == 2'b10); // any addr $8000-$BFFF
-    wire bank_changed = !sgm_bank_we_wire && sgm_bank_we_prev; // falling edge pulse
+    wire sgm_bank_we = is_sgm && game_loaded && !rw_safe && phi2_safe
+                       && (a_stable[15:14] == 2'b10); // any addr $8000-$BFFF
     always @(posedge sys_clk) begin
-        sgm_bank_we_prev <= sgm_bank_we_wire;
         if (!pll_lock || !game_loaded) bank_reg <= 4'd0;  // clear on power-on AND between game loads
-        else if (bank_changed) bank_reg <= d_pipe2[3:0]; // latch on falling edge with stable data
+        else if (sgm_bank_we) bank_reg <= d[3:0];
     end
 
     // SGM read-address mux
@@ -143,7 +129,7 @@ module top (
     //   $C000-$FFFF  →  PSRAM cart_sgm_fixed_bank*16K  (fixed last bank)
     wire [21:0] psram_sgm_addr =
         (a_stable[15:14] == 2'b01) ? {4'b0001, 4'b0000,           a_stable[13:0]} :
-        (a_stable[15:14] == 2'b10) ? {4'b0000, bank_reg,            a_stable[13:0]} :
+        (a_stable[15:14] == 2'b10) ? {4'b0000, bank_reg,           a_stable[13:0]} :
                                      {4'b0000, cart_sgm_fixed_bank, a_stable[13:0]};
 
     // SGM RAM write path — CPU writes to $4000-$7FFF byte-write PSRAM 0x40000.
@@ -162,14 +148,13 @@ module top (
         if (!pll_lock) begin
             sgm_wr_pending <= 0;
         end else if (sgm_ram_we_wire && !sgm_ram_we_prev && !sgm_wr_pending) begin
-            // RISING EDGE: address is stable — latch it immediately.
+            // Rising edge: latch address only. buf_dir is still 1 this cycle
+            // (transceiver hasn't turned around), so d is NOT valid yet.
             sgm_wr_addr_r  <= {4'b0001, 4'b0000, a_stable[13:0]}; // 0x40000+offset
-        end else if (!sgm_ram_we_wire && sgm_ram_we_prev && !sgm_wr_pending) begin
-            // FALLING EDGE: 6502 data bus now fully settled.
-            // d_pipe2 holds d from 3 sys_clk cycles (~37ns) before fall —
-            // well within the valid data window and before bus release.
+        end else if (sgm_ram_we_wire && sgm_ram_we_prev && !sgm_wr_pending) begin
+            // Second cycle of write: buf_dir=0 settled, d now has valid CPU write data.
             sgm_wr_pending <= 1;
-            sgm_wr_byte_r  <= d_pipe2;
+            sgm_wr_byte_r  <= d;
         end else if (sgm_wr_pending && !psram_busy) begin
             sgm_do_write_r <= 1;
             sgm_wr_pending <= 0;
@@ -422,9 +407,9 @@ module top (
                 if (!switch_pending) last_req_addr <= 16'hFFFF; // preserve during handover
             end
             // Cache invalidation — must come last to win NBA race.
-            // bank_changed:   ROM bank committed on falling edge — stale read.
-            // sgm_do_write_r: SGM RAM written — re-fetch on next access.
-            if (bank_changed || sgm_do_write_r) last_req_addr <= 16'hFFFF;
+            // sgm_bank_we:    ROM bank switched, cached read is stale.
+            // sgm_do_write_r: SGM RAM written, re-fetch on next access.
+            if (sgm_bank_we || sgm_do_write_r) last_req_addr <= 16'hFFFF;
         end
     end
 
