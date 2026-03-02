@@ -1,4 +1,4 @@
- set romsize 48k
+ set romsize 32k
  displaymode 320A
  set zoneheight 8
  set screenheight 192
@@ -94,20 +94,20 @@ draw_game_list
  return
 
 draw_hud
- plotchars $7F00 1 10 13 14
- plotchars $7F10 1 80 13 14
- plotchars $7F20 1 10 14 14
- plotchars $7F30 1 80 14 14
- plotchars $7F40 1 10 15 14
- plotchars $7F50 1 80 15 14
- plotchars $7F60 1 10 16 14
- plotchars $7F70 1 80 16 14
- plotchars $7F80 1 10 17 14
- plotchars $7F90 1 80 17 14
- plotchars $7FA0 1 10 18 14
- plotchars $7FB0 1 80 18 14
- plotchars $7FC0 1 10 19 14
- plotchars $7FD0 1 80 19 14
+ ; plotchars $7F00 1 10 13 14
+ ; plotchars $7F10 1 80 13 14
+ ; plotchars $7F20 1 10 14 14
+ ; plotchars $7F30 1 80 14 14
+ ; plotchars $7F40 1 10 15 14
+ ; plotchars $7F50 1 80 15 14
+ ; plotchars $7F60 1 10 16 14
+ ; plotchars $7F70 1 80 16 14
+ ; plotchars $7F80 1 10 17 14
+ ; plotchars $7F90 1 80 17 14
+ ; plotchars $7FA0 1 10 18 14
+ ; plotchars $7FB0 1 80 18 14
+ ; plotchars $7FC0 1 10 19 14
+ ; plotchars $7FD0 1 80 19 14
  return
 
 
