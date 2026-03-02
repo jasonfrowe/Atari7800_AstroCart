@@ -134,23 +134,43 @@ module top (
 
     // SGM RAM write path — CPU writes to $4000-$7FFF byte-write PSRAM 0x40000.
     // Uses a registered 1-cycle pulse to avoid combinational loop through busy.
+    //
+    // CRITICAL TIMING NOTE — buf_dir/d race:
+    //   assign d = (should_drive) ? ... : 8'bz;  ← combinational on rw_safe
+    //   buf_dir <= ...;                           ← registered, 1-cycle lag
+    //
+    //   At the rising edge of sgm_ram_we_wire (cycle N), rw_safe just went 0
+    //   so 'd' is already Z on the FPGA inout, but buf_dir is still 1 (output)
+    //   so the external transceiver still faces FPGA→CPU.  The CPU write data
+    //   has NOT yet propagated through to the FPGA d pin.
+    //   At cycle N+1, buf_dir=0 (CPU→FPGA) and d is valid CPU write data.
+    //
+    //   Fix: use a two-stage approach.  On the rising edge, record the address
+    //   and set sgm_capture_r.  One cycle later capture d (bus now valid).
     reg        sgm_wr_pending;
     reg        sgm_do_write_r;
     reg [21:0] sgm_wr_addr_r;
     reg [7:0]  sgm_wr_byte_r;
     reg        sgm_ram_we_prev;
+    reg        sgm_capture_r;   // 1-cycle delay: capture d one cycle after edge
     wire sgm_ram_we_wire = is_sgm && cart_ram_at_4000 && game_loaded
                            && !rw_safe && phi2_safe
                            && (a_stable[15:14] == 2'b01); // $4000-$7FFF
     always @(posedge sys_clk) begin
         sgm_ram_we_prev <= sgm_ram_we_wire;
         sgm_do_write_r  <= 0; // default: pulse low
+        sgm_capture_r   <= 0;
         if (!pll_lock) begin
             sgm_wr_pending <= 0;
         end else if (sgm_ram_we_wire && !sgm_ram_we_prev && !sgm_wr_pending) begin
-            sgm_wr_pending <= 1;
+            // Cycle N: edge detected. Record address. Do NOT sample d yet —
+            // buf_dir is still 1 (output) this cycle so d reflects old FPGA data.
             sgm_wr_addr_r  <= {4'b0001, 4'b0000, a_stable[13:0]}; // 0x40000+offset
+            sgm_capture_r  <= 1; // flag: sample d next cycle
+        end else if (sgm_capture_r) begin
+            // Cycle N+1: buf_dir is now 0 (CPU→FPGA). d carries valid CPU write data.
             sgm_wr_byte_r  <= d;
+            sgm_wr_pending <= 1;
         end else if (sgm_wr_pending && !psram_busy) begin
             sgm_do_write_r <= 1;
             sgm_wr_pending <= 0;
