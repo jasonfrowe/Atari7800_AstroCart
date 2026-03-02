@@ -72,6 +72,30 @@ module cart_loader (
     );
     assign sd_clk = sd_sclk_internal;
 
+    // -----------------------------------------------------------------------
+    // 2-FF synchronizers: 40.5MHz SD domain → 81MHz clk_sys domain
+    //
+    // sd_ready = (state == IDLE) is COMBINATIONAL in sd_controller.v.
+    // During SD state transitions, it can glitch high for nanoseconds.
+    // At 81MHz (2× the SD clock), these glitches are wide enough to be
+    // captured as valid pulses, triggering the "Abort on read error" path
+    // in SD_WAIT/SD_SCAN_WAIT and cutting sector reads short → partial
+    // PSRAM load → game crash.  This explains intermittent load failures
+    // that disappear after an FPGA reprogram (fresh SD init).
+    //
+    // sd_byte_available is registered in sd_controller but still crosses
+    // a clock domain; synchronize it too for metastability safety.
+    // 2 FFs give 1/MTBF rate far below one failure per million years at 81MHz.
+    // -----------------------------------------------------------------------
+    reg sd_ready_r1, sd_ready_s;    // synchronized sd_ready
+    reg sd_ba_r1,    sd_ba_s;       // synchronized sd_byte_available
+    always @(posedge clk_sys) begin
+        sd_ready_r1 <= sd_ready;
+        sd_ready_s  <= sd_ready_r1;
+        sd_ba_r1    <= sd_byte_available;
+        sd_ba_s     <= sd_ba_r1;
+    end
+
     // Simplified Sequential Loader
     localparam SD_IDLE       = 0;
     localparam SD_START      = 1;
@@ -185,7 +209,7 @@ module cart_loader (
                 SD_IDLE: begin
                     // TRIGGER: Only latch command when the SD controller is initialized and ready.
                     // Act purely on the transition edge of the write cycle to ignore noisy intermediate states.
-                    if (trigger_eval && sd_ready) begin
+                    if (trigger_eval && sd_ready_s) begin
                         
                         if (!game_loaded && (d_latched >= 8'h80 && d_latched <= 8'h8F)) begin
                             // The payload is the game index
@@ -227,11 +251,11 @@ module cart_loader (
                 end
                                  SD_START: begin
                      psram_wr_req <= 0;
-                     if (sd_ready) begin
+                     if (sd_ready_s) begin
                          sd_rd <= 1; // Assert RD to kick off block load
                      end
                      else if (sd_rd) begin
-                         sd_rd <= 0; // sd_ready went low, it heard us!
+                         sd_rd <= 0; // sd_ready_s went low, it heard us!
                          byte_index <= 0;
                          sd_state <= SD_WAIT;
                      end
@@ -239,17 +263,17 @@ module cart_loader (
                  
                  SD_WAIT: begin
                      // 4-Phase Handshake Drop:
-                     if (sd_rd && !sd_byte_available) begin
-                         sd_rd <= 0; // Drop ACK when we see it was received 
+                     if (sd_rd && !sd_ba_s) begin
+                         sd_rd <= 0; // Drop ACK when we see it was received
                      end
                      
-                     if (sd_byte_available && !sd_rd && !write_pending) begin
+                     if (sd_ba_s && !sd_rd && !write_pending) begin
                          sd_dout_reg <= sd_dout;     // Capture Data
                          sd_rd <= 1;                 // Assert ACK
                          sd_state <= SD_DATA;        // Handle PSRAM Write
-                     end else if (!sd_byte_available && !sd_rd && byte_index >= 512 && !write_pending) begin
+                     end else if (!sd_ba_s && !sd_rd && byte_index >= 512 && !write_pending) begin
                          sd_state <= SD_NEXT;
-                     end else if (sd_ready && !sd_rd && byte_index < 512) begin
+                     end else if (sd_ready_s && !sd_rd && byte_index < 512) begin
                          sd_state <= SD_NEXT; // Abort on read error
                      end
                  end
@@ -382,7 +406,7 @@ module cart_loader (
                      byte_index <= 0;
                      bram_we <= 0;
                      
-                     if (sd_ready) begin
+                     if (sd_ready_s) begin
                          sd_rd <= 1;
                      end
                      else if (sd_rd) begin
@@ -393,15 +417,15 @@ module cart_loader (
                  
                  SD_SCAN_WAIT: begin
                      bram_we <= 0; // Pulse low
-                     if (sd_rd && !sd_byte_available) sd_rd <= 0;
+                     if (sd_rd && !sd_ba_s) sd_rd <= 0;
                      
-                     if (sd_byte_available && !sd_rd) begin
+                     if (sd_ba_s && !sd_rd) begin
                          sd_dout_reg <= sd_dout;
                          sd_rd <= 1;
                          sd_state <= SD_SCAN_DATA;
-                     end else if (!sd_byte_available && !sd_rd && byte_index >= 512) begin
+                     end else if (!sd_ba_s && !sd_rd && byte_index >= 512) begin
                          sd_state <= SD_SCAN_NEXT;
-                     end else if (sd_ready && !sd_rd && byte_index < 512) begin
+                     end else if (sd_ready_s && !sd_rd && byte_index < 512) begin
                          // [FIX] Abort if controller goes IDLE prematurely (timeout/error)
                          sd_state <= SD_SCAN_NEXT;
                      end

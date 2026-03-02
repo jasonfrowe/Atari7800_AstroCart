@@ -32,7 +32,7 @@ module sd_controller(
     output reg ready_for_next_byte, // A new byte should be presented on [din].
 
     input reset, // Resets controller on assertion.
-    output ready, // HIGH if the SD card is ready for a read or write operation.
+    output reg ready, // HIGH if the SD card is ready for a read or write operation.
     input [31:0] address,   // Memory address for read/write operation. This MUST 
                             // be a multiple of 512 bytes, due to SD sectoring.
     input clk,  // normal speed clock
@@ -375,5 +375,7 @@ module sd_controller(
 
     assign sclk = sclk_sig;
     assign mosi = cmd_mode ? cmd_out[55] : data_sig[7];
-    assign ready = (state == IDLE);
+    // ready is now driven as a registered output within the always block
+    // to prevent combinational glitches from the state==IDLE decode.
+    always @(posedge clk) ready <= (state == IDLE);
 endmodule
