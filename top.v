@@ -121,16 +121,11 @@ module top (
     // SGM read-address mux
     //   $4000-$7FFF  →  PSRAM 0x40000 + a[13:0]  (16KB RAM above ROM)
     //   $8000-$BFFF  →  PSRAM bank_reg*16K + a[13:0]  (switchable ROM bank)
-    //   $C000-$FFFF  →  PSRAM sgm_fixed_bank*16K + a[13:0]  (fixed last bank)
-    //
-    // sgm_fixed_bank = (cart_rom_size / 16384) - 1  using 4-bit wrap arithmetic:
-    //   128KB (8 banks):  cart_rom_size[17:14] = 8 → 8-1 = 7  → PSRAM 0x1C000
-    //   256KB (16 banks): cart_rom_size[17:14] = 0 (wraps) → 0-1 = 15 → PSRAM 0x3C000
-    wire [3:0] sgm_fixed_bank = cart_rom_size[17:14] - 4'd1;
+    //   $C000-$FFFF  →  PSRAM 0x3C000 + a[13:0]  (fixed bank 15)
     wire [21:0] psram_sgm_addr =
-        (a_stable[15:14] == 2'b01) ? {4'b0001, 4'b0000,      a_stable[13:0]} :
-        (a_stable[15:14] == 2'b10) ? {4'b0000, bank_reg,      a_stable[13:0]} :
-                                     {4'b0000, sgm_fixed_bank, a_stable[13:0]};
+        (a_stable[15:14] == 2'b01) ? {4'b0001, 4'b0000, a_stable[13:0]} :
+        (a_stable[15:14] == 2'b10) ? {4'b0000, bank_reg, a_stable[13:0]} :
+                                     {4'b0000, 4'b1111,  a_stable[13:0]};
 
     // SGM RAM write path — CPU writes to $4000-$7FFF byte-write PSRAM 0x40000.
     // Uses a registered 1-cycle pulse to avoid combinational loop through busy.
@@ -296,10 +291,9 @@ module top (
     wire [21:0] psram_addr_mux = game_loaded
         ? (is_sgm ? psram_sgm_addr : ({6'b0, a_stable} - 22'h004000))
         : prefetch_active
-            // SGM: $FFFC is in the fixed (last) bank.
-            // Address = sgm_fixed_bank * 16K + $3FFC
+            // SGM: $FFFC is in fixed bank 15 → PSRAM 0x3C000 + 0x3FFC = 0x3FFFC
             // Standard: $FFFC - $4000 = 0x00BFFC
-            ? (is_sgm ? {4'b0000, sgm_fixed_bank, 14'h3FFC} : 22'h00BFFC)
+            ? (is_sgm ? 22'h03FFFC : 22'h00BFFC)
             : psram_write_addr_latched[21:0];
     wire [22:0] psram_cmd_addr = {1'b0, psram_addr_mux};
 

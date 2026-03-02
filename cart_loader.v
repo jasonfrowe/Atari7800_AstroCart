@@ -104,7 +104,6 @@ module cart_loader (
     localparam SD_NEXT       = 4;
     localparam SD_COMPLETE   = 5;
     localparam SD_DRAIN      = 9; // Wait for last PSRAM write to commit
-    localparam SD_RAM_INIT   = 14; // Zero-init 16KB SGM RAM before handover
     
     localparam SD_SCAN_START = 10;
     localparam SD_SCAN_WAIT  = 11;
@@ -124,7 +123,6 @@ module cart_loader (
     reg trigger_eval;
     reg trigger_lock_active;
     reg [7:0] drain_timer;
-    reg [13:0] ram_init_count; // 0..0x2000, counts 16-bit words zeroed in SGM RAM
     reg [7:0] d_pipe [0:2];
     
     reg [4:0] scan_game_idx; // Scan up to 32 games
@@ -163,7 +161,6 @@ module cart_loader (
              psram_load_addr <= 23'h000000;
              sd_dout_reg <= 0;
              drain_timer <= 0;
-             ram_init_count <= 0;
              
              scan_game_idx <= 0;
              bram_we <= 0;
@@ -367,39 +364,8 @@ module cart_loader (
                       // Wait ~400ns (32 cycles @ 81MHz) to ensure last write is committed
                       drain_timer <= drain_timer + 1;
                       if (drain_timer == 32) begin
-                          if (cart_ram_at_4000) begin
-                              // SGM game with RAM: zero the 16KB region before handover
-                              sd_state <= SD_RAM_INIT;
-                              ram_init_count <= 0;
-                              // busy stays 1 while we write zeros
-                          end else begin
-                              sd_state <= SD_COMPLETE;
-                              busy <= 0;
-                          end
-                      end
-                  end
-
-                  SD_RAM_INIT: begin
-                      // Zero-initialise PSRAM 0x40000-0x43FFE (16KB SGM RAM),
-                      // 8192 word writes.  MARIA starts DMA as soon as game_loaded=1,
-                      // so if this region has power-on garbage it renders a garbled
-                      // display list.  Writing zeros here gives the game a clean slate.
-                      //
-                      // Address formula: 0x40000 + count*2
-                      //   psram_write_addr_latched[21:0] = {1'b1, 4'b0, count[12:0], 1'b0}
-                      //   = bit18 set = 0x40000 base, + count*2 offset
-                      if (!write_pending && !psram_busy) begin
-                          if (ram_init_count < 14'h2000) begin
-                              acc_word0              <= 16'h0000;
-                              psram_write_addr_latched <= {4'b0, 1'b1, 4'b0,
-                                                           ram_init_count[12:0], 1'b0};
-                              write_pending  <= 1;
-                              ram_init_count <= ram_init_count + 1;
-                          end else begin
-                              // All 8192 words written and PSRAM idle — hand off
-                              sd_state <= SD_COMPLETE;
-                              busy     <= 0;
-                          end
+                          sd_state <= SD_COMPLETE;
+                          busy <= 0;
                       end
                   end
                  
