@@ -327,24 +327,24 @@ module top (
     assign O_psram_reset_n = 1'b1;
     
     // Data Capture Logic
-    // Use live psram_dout_16 with live psram_cmd_addr[0] for byte selection.
-    // For non-SGM games, gate out-of-range reads (addresses below the game's
-    // actual PSRAM load offset) by returning 0xFF instead of stale data from
-    // a previously-loaded game.  0xFF is the open-bus / unpopulated-ROM value
-    // the real hardware returns for unoccupied cartridge address space.
+    // ip_data_buffer returns the correct byte from the most recent PSRAM read.
+    // For non-SGM games we return 0xFF for CPU addresses below the game's load
+    // base (open-bus), preventing stale data from a previously-loaded larger
+    // game from being served.  The load base is registered at switch_pending
+    // time (cart_rom_size is fully settled by then) to avoid a deep
+    // combinational path from the cart_loader output at 81MHz.
     //
-    // Standard games load at: psram_load_addr = 49152 - cart_rom_size
-    // e.g. Choplifter 32KB → load offset 0x4000; valid PSRAM range 0x4000-0xBFFF.
-    // After loading ARTI (256KB), PSRAM 0x0000-0x3FFF holds stale ARTI bytes.
-    // Without this gate, Choplifter reads those as $4000-$7FFF data → crash.
-    // SGM games use psram_sgm_addr which already maps correctly; no gate needed.
-    wire [21:0] psram_load_offset = 22'd49152 - {6'b0, cart_rom_size[15:0]}; // = 49152 - size
-    wire addr_in_rom_range = is_sgm || (psram_cmd_addr[21:0] >= psram_load_offset);
+    // Standard layout (ROM end-aligned at $FFFF):
+    //   16KB: loads at $C000  (cpu_rom_base = 16'hC000)
+    //   32KB: loads at $8000  (cpu_rom_base = 16'h8000)
+    //   48KB: loads at $4000  (cpu_rom_base = 16'h4000)
+    reg [15:0] cpu_rom_base;   // lowest CPU address that maps to real ROM data
+    wire addr_in_rom_range = is_sgm || (a_stable >= cpu_rom_base);
     always @* begin
         if (addr_in_rom_range)
             ip_data_buffer = psram_cmd_addr[0] ? psram_dout_16[15:8] : psram_dout_16[7:0];
         else
-            ip_data_buffer = 8'hFF; // open bus — address outside this game's ROM
+            ip_data_buffer = 8'hFF; // open bus — below this game's ROM region
     end
 
     // PSRAM Read/Write Logic
@@ -359,6 +359,7 @@ module top (
         if (sd_reset) begin
             last_req_addr <= 16'hFFFF;
             prefetch_active <= 0;
+            cpu_rom_base <= 16'h4000; // default: 48KB
         end else begin
             // ---------------------------------------------------------------
             // RESET-VECTOR PRE-FETCH
@@ -379,6 +380,11 @@ module top (
             // fires, and psram_dout_16 already holds the correct vector data.
             // ---------------------------------------------------------------
             if (switch_pending && !switch_pending_prev && !psram_busy && !game_loaded) begin
+                // Latch the ROM base address for this game now — cart_rom_size is
+                // fully settled (set in SD_NEXT during loading, long before here).
+                // cpu_rom_base = 0x10000 - cart_rom_size (ROM is end-aligned at $FFFF).
+                // SGM carts set is_sgm so cpu_rom_base is ignored for them.
+                cpu_rom_base    <= 16'h0000 - cart_rom_size[15:0];
                 psram_rd_req    <= 1;
                 prefetch_active <= 1;
                 last_req_addr   <= 16'hFFFC;  // $FFFC will have been fetched
