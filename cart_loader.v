@@ -104,6 +104,7 @@ module cart_loader (
     localparam SD_DATA       = 3;
     localparam SD_NEXT       = 4;
     localparam SD_COMPLETE   = 5;
+    localparam SD_ZERO_RAM   = 6; // Zero 16KB SGM RAM at PSRAM 0x40000 before handover
     localparam SD_DRAIN      = 9; // Wait for last PSRAM write to commit
     
     localparam SD_SCAN_START = 10;
@@ -375,8 +376,33 @@ module cart_loader (
                       // Wait ~400ns (32 cycles @ 81MHz) to ensure last write is committed
                       drain_timer <= drain_timer + 1;
                       if (drain_timer == 32) begin
-                          sd_state <= SD_COMPLETE;
-                          busy <= 0;
+                          if (cart_ram_at_4000) begin
+                              // Zero the 16KB SGM RAM (PSRAM 0x040000-0x043FFF)
+                              // before game handover so the game starts with clean RAM.
+                              // Uses reliable full-word writes (no byte-mask dependency).
+                              sd_state       <= SD_ZERO_RAM;
+                              psram_load_addr <= 23'h040000;
+                              acc_word0       <= 16'h0000;
+                              // busy stays 1 — keep menu blocked during zero-init
+                          end else begin
+                              sd_state <= SD_COMPLETE;
+                              busy     <= 0;
+                          end
+                      end
+                  end
+
+                  SD_ZERO_RAM: begin
+                      // Write 0x0000 to each 16-bit word in the SGM RAM region.
+                      // Loop: PSRAM 0x040000 to 0x043FFE inclusive (8192 words = 16KB).
+                      if (!write_pending && !psram_busy) begin
+                          if (psram_load_addr < 23'h044000) begin
+                              psram_write_addr_latched <= {psram_load_addr[22:1], 1'b0};
+                              write_pending            <= 1;
+                              psram_load_addr          <= psram_load_addr + 23'd2;
+                          end else begin
+                              sd_state <= SD_COMPLETE;
+                              busy     <= 0;
+                          end
                       end
                   end
                  
