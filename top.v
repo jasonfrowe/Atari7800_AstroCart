@@ -116,7 +116,7 @@ module top (
     // Bank register — CPU write to $8000-$BFFF latches d[3:0] as the bank
     // number for the switchable window.  Held at 0 until PLL locks.
     reg [3:0] bank_reg;
-    wire sgm_bank_we = is_sgm && game_loaded && !rw_safe && phi2_safe
+    wire sgm_bank_we = is_sgm && game_loaded && !rw_safe
                        && (a_stable[15:14] == 2'b10); // any addr $8000-$BFFF
     always @(posedge sys_clk) begin
         if (!pll_lock || !game_loaded) bank_reg <= 4'd0;  // clear on power-on AND between game loads
@@ -133,40 +133,24 @@ module top (
                                      {4'b0000, cart_sgm_fixed_bank, a_stable[13:0]};
 
     // SGM RAM write path — CPU writes to $4000-$7FFF byte-write PSRAM 0x40000.
-    //
-    // TIMING — buf_dir/d race on write rising edge:
-    //   buf_dir is a REGISTER updated at posedge sys_clk.
-    //   At posedge C+1 (when sgm_ram_we rising edge is first detected):
-    //     buf_dir was just set to 0 at this edge — but d is evaluated with the
-    //     PRE-edge value, i.e. buf_dir still=1 (FPGA→CPU), so the external
-    //     transceiver points the wrong way and CPU write data is NOT on d yet.
-    //   At posedge C+2 onward: buf_dir=0, transceiver CPU→FPGA, d is valid.
-    //
-    //   Solution: capture address at rising edge (a_stable is valid),
-    //   capture data at FALLING edge (buf_dir has been 0 for ~20 cycles,
-    //   d holds stable CPU write data throughout and past phi2 end).
+    // Uses a registered 1-cycle pulse to avoid combinational loop through busy.
     reg        sgm_wr_pending;
     reg        sgm_do_write_r;
     reg [21:0] sgm_wr_addr_r;
     reg [7:0]  sgm_wr_byte_r;
     reg        sgm_ram_we_prev;
     wire sgm_ram_we_wire = is_sgm && cart_ram_at_4000 && game_loaded
-                           && !rw_safe && phi2_safe
+                           && !rw_safe
                            && (a_stable[15:14] == 2'b01); // $4000-$7FFF
     always @(posedge sys_clk) begin
         sgm_ram_we_prev <= sgm_ram_we_wire;
         sgm_do_write_r  <= 0; // default: pulse low
         if (!pll_lock) begin
             sgm_wr_pending <= 0;
-        end else if (sgm_ram_we_wire && !sgm_ram_we_prev) begin
-            // Rising edge: latch address. Do NOT sample d here — buf_dir is
-            // still 1 at this evaluation so CPU write data is not on d yet.
-            sgm_wr_addr_r <= {4'b0001, 4'b0000, a_stable[13:0]}; // 0x40000+offset
-        end else if (!sgm_ram_we_wire && sgm_ram_we_prev && !sgm_wr_pending) begin
-            // Falling edge: buf_dir has been 0 (CPU→FPGA) for ~20 sys_clk cycles.
-            // d holds valid CPU write data — capture it now.
-            sgm_wr_byte_r  <= d;
+        end else if (sgm_ram_we_wire && !sgm_ram_we_prev && !sgm_wr_pending) begin
             sgm_wr_pending <= 1;
+            sgm_wr_addr_r  <= {4'b0001, 4'b0000, a_stable[13:0]}; // 0x40000+offset
+            sgm_wr_byte_r  <= d;
         end else if (sgm_wr_pending && !psram_busy) begin
             sgm_do_write_r <= 1;
             sgm_wr_pending <= 0;
@@ -202,8 +186,8 @@ module top (
     wire should_drive = is_rom && rw_safe;
 
     // Write Enables
-    wire pokey_we   = is_pokey && !rw_safe && phi2_safe;
-    wire trigger_we = is_2200  && !rw_safe && phi2_safe;
+    wire pokey_we   = is_pokey && !rw_safe;
+    wire trigger_we = is_2200  && !rw_safe;
 
     // ========================================================================
     // 4. OUTPUTS
