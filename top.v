@@ -139,7 +139,6 @@ module top (
     reg [21:0] sgm_wr_addr_r;
     reg [7:0]  sgm_wr_byte_r;
     reg        sgm_ram_we_prev;
-    reg [4:0]  sgm_wr_dly;          // counts cycles into the write pulse
     wire sgm_ram_we_wire = is_sgm && cart_ram_at_4000 && game_loaded
                            && !rw_safe && phi2_safe
                            && (a_stable[15:14] == 2'b01); // $4000-$7FFF
@@ -148,22 +147,14 @@ module top (
         sgm_do_write_r  <= 0; // default: pulse low
         if (!pll_lock) begin
             sgm_wr_pending <= 0;
-            sgm_wr_dly     <= 0;
         end else if (sgm_ram_we_wire && !sgm_ram_we_prev && !sgm_wr_pending) begin
-            // RISING EDGE: address is stable — latch it and start the delay counter.
-            sgm_wr_addr_r <= {4'b0001, 4'b0000, a_stable[13:0]}; // 0x40000+offset
-            sgm_wr_dly    <= 1;
-        end else if (sgm_ram_we_wire && sgm_wr_dly != 0 && sgm_wr_dly < 20) begin
-            // COUNT: still within phi2 high, waiting for 6502 data bus to settle.
-            // 6502 worst-case data valid = 200ns; cycle 20 = 247ns — safely past it.
-            sgm_wr_dly <= sgm_wr_dly + 1;
-        end else if (sgm_ram_we_wire && sgm_wr_dly == 20 && !sgm_wr_pending) begin
-            // LATCH: 247ns into phi2 — d is guaranteed stable. Capture and queue.
-            sgm_wr_byte_r  <= d;
+            // Rising edge: latch address only. buf_dir is still 1 this cycle
+            // (transceiver hasn't turned around), so d is NOT valid yet.
+            sgm_wr_addr_r  <= {4'b0001, 4'b0000, a_stable[13:0]}; // 0x40000+offset
+        end else if (sgm_ram_we_wire && sgm_ram_we_prev && !sgm_wr_pending) begin
+            // Second cycle of write: buf_dir=0 settled, d now has valid CPU write data.
             sgm_wr_pending <= 1;
-            sgm_wr_dly     <= 0;
-        end else if (!sgm_ram_we_wire) begin
-            sgm_wr_dly <= 0; // reset counter whenever write is not active
+            sgm_wr_byte_r  <= d;
         end else if (sgm_wr_pending && !psram_busy) begin
             sgm_do_write_r <= 1;
             sgm_wr_pending <= 0;
