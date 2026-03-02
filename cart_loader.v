@@ -39,7 +39,8 @@ module cart_loader (
     output reg cart_has_pokey,
     output reg [15:0] cart_pokey_addr,
     output reg [3:0]  cart_mapper,      // 0=standard, 1=SuperGame
-    output reg        cart_ram_at_4000  // 1=16KB BRAM mapped at $4000-$7FFF
+    output reg        cart_ram_at_4000, // 1=16KB BRAM mapped at $4000-$7FFF
+    output reg [3:0]  cart_sgm_fixed_bank // last ROM bank index (registered)
 );
 
     // SD Controller signals
@@ -172,7 +173,8 @@ module cart_loader (
              cart_pokey_addr <= 16'h0450;
              cart_mapper <= 4'd0;
              cart_ram_at_4000 <= 0;
-             sector_limit <= 10'd512;
+             cart_sgm_fixed_bank <= 4'd15; // default: bank 15 (256KB)
+             sector_limit <= 10'd96;      // will be overwritten in SD_NEXT
         end else begin
              trigger_we_prev <= trigger_we;
              
@@ -325,11 +327,19 @@ module cart_loader (
                              // Guard: h0==4 alone is not enough — many standard games
                              // set h0=4 but leave h64=0 (standard mapper).
                              // Only use the V4+ SuperGame path when h64 is non-zero.
-                             cart_rom_size    <= size_be_wire;
-                             psram_load_addr  <= 23'h000000; // Load full ROM from addr 0
-                             sector_limit     <= 10'd513;    // 1 header + 512 data sectors
-                             cart_mapper      <= h64[3:0];   // byte 64: mapper type
-                             cart_ram_at_4000 <= h65[0];     // byte 65 bit0: RAM at $4000
+                             cart_rom_size       <= size_be_wire;
+                             psram_load_addr     <= 23'h000000;       // Load full ROM from addr 0
+                             // sector_limit = rom_size/512: loop reads exactly
+                             // this many data sectors before stopping, so the
+                             // last PSRAM write lands at ROM end (not 0x40000+).
+                             sector_limit        <= size_be_wire[18:9]; // rom_bytes / 512
+                             cart_mapper         <= h64[3:0];           // byte 64: mapper type
+                             cart_ram_at_4000    <= h65[0];             // byte 65 bit0: RAM at $4000
+                             // fixed bank = last bank index = (num_banks - 1).
+                             // num_banks = rom_size / 16384 = size_be_wire[17:14].
+                             // 4-bit natural underflow handles 256KB (16 banks
+                             // → bits[17:14]=0 → 0-1=15) and 128KB (8→7). ✓
+                             cart_sgm_fixed_bank <= size_be_wire[17:14] - 4'd1;
                              // byte 67: audio flags
                              if      (h67[1]) begin cart_has_pokey <= 1; cart_pokey_addr <= 16'h0450; end
                              else if (h67[0]) begin cart_has_pokey <= 1; cart_pokey_addr <= 16'h4000; end
@@ -342,6 +352,7 @@ module cart_loader (
                              // size_be_wire is always the correct interpretation.
                              cart_rom_size   <= size_be_wire;
                              psram_load_addr <= 49152 - size_be_wire;
+                             sector_limit    <= size_be_wire[18:9]; // rom_bytes / 512
                              // Flags: byte 53 = high flags, byte 54 = low flags
                              if      (h54[6]) begin cart_has_pokey <= 1; cart_pokey_addr <= 16'h0450; end
                              else if (h54[0]) begin cart_has_pokey <= 1; cart_pokey_addr <= 16'h4000; end
