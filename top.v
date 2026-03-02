@@ -116,7 +116,7 @@ module top (
     // Bank register — CPU write to $8000-$BFFF latches d[3:0] as the bank
     // number for the switchable window.  Held at 0 until PLL locks.
     reg [3:0] bank_reg;
-    wire sgm_bank_we = is_sgm && game_loaded && !rw_safe && phi2_safe
+    wire sgm_bank_we = is_sgm && game_loaded && !rw_safe
                        && (a_stable[15:14] == 2'b10); // any addr $8000-$BFFF
     always @(posedge sys_clk) begin
         if (!pll_lock || !game_loaded) bank_reg <= 4'd0;  // clear on power-on AND between game loads
@@ -140,7 +140,7 @@ module top (
     reg [7:0]  sgm_wr_byte_r;
     reg        sgm_ram_we_prev;
     wire sgm_ram_we_wire = is_sgm && cart_ram_at_4000 && game_loaded
-                           && !rw_safe && phi2_safe
+                           && !rw_safe
                            && (a_stable[15:14] == 2'b01); // $4000-$7FFF
     always @(posedge sys_clk) begin
         sgm_ram_we_prev <= sgm_ram_we_wire;
@@ -186,8 +186,8 @@ module top (
     wire should_drive = is_rom && rw_safe;
 
     // Write Enables
-    wire pokey_we   = is_pokey && !rw_safe && phi2_safe;
-    wire trigger_we = is_2200  && !rw_safe && phi2_safe;
+    wire pokey_we   = is_pokey && !rw_safe;
+    wire trigger_we = is_2200  && !rw_safe;
 
     // ========================================================================
     // 4. OUTPUTS
