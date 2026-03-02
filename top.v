@@ -229,10 +229,16 @@ module top (
     // every 45 sys_clk cycles).  It fires well into any phi2 window (~22 cycles
     // wide) where the 6502 data bus is fully settled, so no latching is needed.
     // Passing we/addr/din live matches the original working design (340c9ba).
+    //
+    // pokey_reset_n: cleared both at power-on (!pll_lock) and between game loads
+    // (!game_loaded) so each game starts with clean zero AUDF/AUDC/AUDCTL state.
+    // The menu never writes POKEY (cart_has_pokey=0 while game_loaded=0, so
+    // pokey_we=0 the entire menu phase) so clearing here is safe.
+    wire pokey_reset_n = pll_lock && game_loaded;
     pokey_advanced my_pokey (
         .clk(sys_clk),
         .enable_179mhz(tick_179),
-        .reset_n(pll_lock),
+        .reset_n(pokey_reset_n),
         .addr(a_stable[3:0]),
         .din(d),
         .we(pokey_we),
@@ -342,40 +348,37 @@ module top (
     // PSRAM Read/Write Logic
     reg [15:0] last_req_addr;
     reg game_loaded_d;
-    reg switch_pending_prev;
+    // switch_pending_prev removed — pre-fetch is now level-sensitive (see below)
     
     always @(posedge sys_clk) begin
         game_loaded_d <= game_loaded;
-        switch_pending_prev <= switch_pending;
         
         if (sd_reset) begin
             last_req_addr <= 16'hFFFF;
             prefetch_active <= 0;
         end else begin
             // ---------------------------------------------------------------
-            // RESET-VECTOR PRE-FETCH
-            // When switch_pending rises (from the 0xA5 write to $2200), the
-            // Atari CPU still has several instructions to execute before it
-            // reads $FFFC for the JMP-via-vector handover.  Pre-fetching $FFFC
-            // now gives the PSRAM >450 sys_clk cycles (10+ CPU instructions)
-            // to return the game reset vector long before ip_data_buffer needs
-            // to serve it.
+            // RESET-VECTOR PRE-FETCH  (level-sensitive retry)
+            // Keep trying on every cycle that switch_pending=1 and PSRAM is
+            // free until it fires once (last_req_addr=$FFFC closes the gate).
+            // This tolerates a busy PSRAM at the instant switch_pending rises
+            // (e.g. final SD-write still committing) without permanently
+            // skipping the pre-fetch for this game load.
             //
-            // Without this, psram_dout_16=0 (never read before, only written
-            // by the loader) when game_loaded=1 fires.  The CPU reads 0x00 as
-            // the reset vector, jumps to $0000 (TIA space), and executes TIA
-            // register values as 6502 opcodes for a few seconds before crashing.
-            //
-            // Setting last_req_addr=$FFFC here prevents a second racy read
-            // when game_loaded=1 fires on the $FFFC bus cycle — no new read
-            // fires, and psram_dout_16 already holds the correct vector data.
+            // Why no (!game_loaded_d && game_loaded) override below:
+            // The level-sensitive pre-fetch is guaranteed to complete before
+            // game_loaded=1 (game_loaded only fires when the CPU reads $FFFC,
+            // which is many CPU cycles after switch_pending rises). So
+            // psram_dout_16 already holds the correct vector when game_loaded
+            // fires — no redundant re-read needed.
             // ---------------------------------------------------------------
-            if (switch_pending && !switch_pending_prev && !psram_busy && !game_loaded) begin
+            if (switch_pending && !game_loaded && !psram_busy &&
+                    !prefetch_active && last_req_addr != 16'hFFFC) begin
                 psram_rd_req    <= 1;
                 prefetch_active <= 1;
-                last_req_addr   <= 16'hFFFC;  // $FFFC will have been fetched
+                last_req_addr   <= 16'hFFFC;
             end else if (prefetch_active && psram_busy) begin
-                prefetch_active <= 0;          // PSRAM accepted the request
+                prefetch_active <= 0;   // PSRAM accepted the request
                 psram_rd_req    <= 0;
             // ---------------------------------------------------------------
             // Normal game-mode reads: fire a fresh PSRAM read on every
@@ -385,7 +388,7 @@ module top (
             // ---------------------------------------------------------------
             end else if (game_loaded && !sgm_wr_pending && !sgm_do_write_r &&
                 (a_stable[15] | a_stable[14]) && !psram_busy &&
-                (a_stable != last_req_addr || (!game_loaded_d && game_loaded))) begin
+                a_stable != last_req_addr) begin
                 psram_rd_req <= 1;
                 last_req_addr <= a_stable;
             end else if (psram_busy) begin
