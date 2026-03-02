@@ -168,12 +168,7 @@ module top (
         end
     end
     // Decoders (Using STABLE address to prevent bus contention during transitions)
-    // $8000-$FFFF: always ROM space for all carts.
-    // $4000-$7FFF: only drive for 48KB+ carts (cart_rom_size > 32768) or SGM carts
-    //   (which map SGM RAM there).  32KB carts like Choplifter don't use this range;
-    //   driving it serves stale PSRAM data from a previously-loaded 256KB game and
-    //   causes crashes when BIOS or MARIA accesses $4000-$7FFF.
-    wire is_rom   = a_stable[15] || (a_stable[14] && (is_sgm || cart_rom_size > 32768));
+    wire is_rom   = (a_stable[15] | a_stable[14]);               // $4000-$FFFF
     wire is_pokey = cart_has_pokey && (a_stable[15:4] == cart_pokey_addr[15:4]);
     wire is_2200  = (a_stable == 16'h2200) && !game_loaded;    // $2200 (Menu Control disabled in game)
 
@@ -332,16 +327,24 @@ module top (
     assign O_psram_reset_n = 1'b1;
     
     // Data Capture Logic
-    // Use live psram_dout_16 with live a_stable[0] for byte selection.
-    // This matches the original working approach (commit 340c9ba).
-    // psram_dout_16 holds its value between reads (PsramController keeps dout
-    // stable in IDLE state), so the bus is always valid. The 1-cycle transition
-    // glitch when a new read completes is ~12ns — far below the Atari's ~280ns
-    // data hold window and causes no issues in practice.
-    // Using a registered word buffer instead causes a 12-15 cycle startup window
-    // where the buffer is 0x00, making the CPU read BRK as the reset vector.
+    // Use live psram_dout_16 with live psram_cmd_addr[0] for byte selection.
+    // For non-SGM games, gate out-of-range reads (addresses below the game's
+    // actual PSRAM load offset) by returning 0xFF instead of stale data from
+    // a previously-loaded game.  0xFF is the open-bus / unpopulated-ROM value
+    // the real hardware returns for unoccupied cartridge address space.
+    //
+    // Standard games load at: psram_load_addr = 49152 - cart_rom_size
+    // e.g. Choplifter 32KB → load offset 0x4000; valid PSRAM range 0x4000-0xBFFF.
+    // After loading ARTI (256KB), PSRAM 0x0000-0x3FFF holds stale ARTI bytes.
+    // Without this gate, Choplifter reads those as $4000-$7FFF data → crash.
+    // SGM games use psram_sgm_addr which already maps correctly; no gate needed.
+    wire [21:0] psram_load_offset = 22'd49152 - {6'b0, cart_rom_size[15:0]}; // = 49152 - size
+    wire addr_in_rom_range = is_sgm || (psram_cmd_addr[21:0] >= psram_load_offset);
     always @* begin
-        ip_data_buffer = psram_cmd_addr[0] ? psram_dout_16[15:8] : psram_dout_16[7:0];
+        if (addr_in_rom_range)
+            ip_data_buffer = psram_cmd_addr[0] ? psram_dout_16[15:8] : psram_dout_16[7:0];
+        else
+            ip_data_buffer = 8'hFF; // open bus — address outside this game's ROM
     end
 
     // PSRAM Read/Write Logic
