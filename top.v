@@ -114,7 +114,7 @@ module top (
     wire sgm_bank_we = is_sgm && game_loaded && !rw_safe && phi2_safe
                        && (a_stable[15:14] == 2'b10); // any addr $8000-$BFFF
     always @(posedge sys_clk) begin
-        if (!pll_lock) bank_reg <= 4'd0;
+        if (!pll_lock || !game_loaded) bank_reg <= 4'd0;  // clear on power-on AND between game loads
         else if (sgm_bank_we) bank_reg <= d[3:0];
     end
 
